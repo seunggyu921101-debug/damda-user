@@ -134,15 +134,16 @@ export async function updateSession(request: NextRequest) {
     return isSearchExcludedPath(pathname) ? applySearchExclusion(response) : response;
   }
 
-  // 상품 상세 페이지: 어린이집 승인 사용자만 접근
-  if (user && productPathMatch) {
+  // Every member page requires current approval, including list/cart/checkout routes.
+  // Signup status/revision pages and validated previews use the explicit paths above.
+  if (user && !isPublicPath(pathname)) {
     const { data: daycare } = await supabase
       .from('daycares')
-      .select('status')
+      .select('status, deleted_at')
       .eq('id', user.id)
       .single()
 
-    if (!daycare || daycare.status !== 'approved') {
+    if (!daycare || daycare.status !== 'approved' || daycare.deleted_at) {
       if (daycare?.status === 'rejected') {
         return NextResponse.redirect(new URL('/signup/rejected', request.url))
       } else if (daycare?.status === 'revision_required') {
