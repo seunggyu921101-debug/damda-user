@@ -1,0 +1,706 @@
+{
+  "dev": [
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.auto_confirm_email()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nBEGIN\n  UPDATE auth.users\n  SET email_confirmed_at = NOW()\n  WHERE id = NEW.id AND email_confirmed_at IS NULL;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "19ea7ab708858a1bb15df93980d743d8",
+      "identity": "auto_confirm_email()",
+      "member": true,
+      "name": "auto_confirm_email",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.cleanup_expired_holds()\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nBEGIN \n  DELETE FROM reservation_holds WHERE expires_at < now(); \nEND;\n$function$\n",
+      "hash": "ab8acb1f817f5adcd3da4b7dbda189bd",
+      "identity": "cleanup_expired_holds()",
+      "member": true,
+      "name": "cleanup_expired_holds",
+      "owner": "postgres",
+      "returns": "void",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.auto_complete_reservations()\n RETURNS integer\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nDECLARE\n  updated_count integer;\nBEGIN\n  UPDATE reservations\n  SET status = 'completed', updated_at = now()\n  WHERE status = 'confirmed'\n    AND reserved_date < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date;\n  GET DIAGNOSTICS updated_count = ROW_COUNT;\n  RETURN updated_count;\nEND;\n$function$\n",
+      "hash": "31ad1c377c5e755a11db71b587e54bbb",
+      "identity": "auto_complete_reservations()",
+      "member": true,
+      "name": "auto_complete_reservations",
+      "owner": "postgres",
+      "returns": "integer",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.add_daycare_role_on_approval()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nBEGIN\n  IF NEW.status = 'approved' AND (OLD.status IS NULL OR OLD.status != 'approved') THEN\n    IF EXISTS (SELECT 1 FROM auth.users WHERE id = NEW.id) THEN\n      INSERT INTO user_roles (id, role)\n      VALUES (NEW.id, 'daycare')\n      ON CONFLICT (id) DO UPDATE SET role = 'daycare';\n    END IF;\n  END IF;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "7342a9254814c88d72dfd14c524449b4",
+      "identity": "add_daycare_role_on_approval()",
+      "member": true,
+      "name": "add_daycare_role_on_approval",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.check_reservation_available(p_product_id uuid, p_reserved_date date)\n RETURNS json\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nDECLARE\n  v_has_reservation BOOLEAN;\n  v_has_hold BOOLEAN;\n  v_hold_by_self BOOLEAN;\nBEGIN\n  DELETE FROM reservation_holds WHERE expires_at < now();\n  SELECT EXISTS (\n    SELECT 1 FROM reservations\n    WHERE product_id = p_product_id\n      AND reserved_date = p_reserved_date\n      AND status IN ('pending', 'paid', 'confirmed')\n  ) INTO v_has_reservation;\n  IF v_has_reservation THEN\n    RETURN json_build_object('available', false, 'reason', 'already_reserved', 'message', '해당 날짜에 이미 예약이 있습니다.');\n  END IF;\n  SELECT \n    EXISTS (SELECT 1 FROM reservation_holds WHERE product_id = p_product_id AND reserved_date = p_reserved_date AND expires_at > now()),\n    EXISTS (SELECT 1 FROM reservation_holds WHERE product_id = p_product_id AND reserved_date = p_reserved_date AND expires_at > now() AND daycare_id = auth.uid())\n  INTO v_has_hold, v_hold_by_self;\n  IF v_has_hold AND NOT v_hold_by_self THEN\n    RETURN json_build_object('available', false, 'reason', 'hold_by_other', 'message', '다른 사용자가 결제를 진행 중입니다.');\n  END IF;\n  RETURN json_build_object('available', true, 'reason', null, 'message', null);\nEND;\n$function$\n",
+      "hash": "1b05458183f39f3153b7ab038c8f4ea4",
+      "identity": "check_reservation_available(uuid,date)",
+      "member": true,
+      "name": "check_reservation_available",
+      "owner": "postgres",
+      "returns": "json",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.get_unavailable_dates(p_product_id uuid)\n RETURNS text[]\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nDECLARE\n  result TEXT[];\nBEGIN\n  DELETE FROM reservation_holds WHERE expires_at < now();\n  SELECT ARRAY_AGG(DISTINCT reserved_date::TEXT)\n  INTO result\n  FROM (\n    SELECT reserved_date\n    FROM reservations\n    WHERE product_id = p_product_id\n      AND status IN ('pending', 'paid', 'confirmed')\n    UNION\n    SELECT reserved_date\n    FROM reservation_holds\n    WHERE product_id = p_product_id\n      AND expires_at > now()\n      AND daycare_id != COALESCE(auth.uid(), '00000000-0000-0000-0000-000000000000'::UUID)\n  ) AS unavailable;\n  RETURN COALESCE(result, ARRAY[]::TEXT[]);\nEND;\n$function$\n",
+      "hash": "ce867129faa40d30beb2af41f81619b4",
+      "identity": "get_unavailable_dates(uuid)",
+      "member": true,
+      "name": "get_unavailable_dates",
+      "owner": "postgres",
+      "returns": "text[]",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.next_generated_document_number(p_type text)\n RETURNS text\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\n  SELECT upper(left(regexp_replace(p_type, '[^a-zA-Z]', '', 'g'), 3))\n    || '-' || to_char(current_date, 'YYYYMMDD')\n    || '-' || lpad(nextval('public.generated_document_number_seq')::text, 6, '0');\n$function$\n",
+      "hash": "f9273da5b5e0f21726aa5231f823f68f",
+      "identity": "next_generated_document_number(text)",
+      "member": true,
+      "name": "next_generated_document_number",
+      "owner": "postgres",
+      "returns": "text",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.delete_business_owner_safely(p_business_owner_id uuid, p_confirmation_name text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_owner public.business_owners%ROWTYPE;\n  v_product_count integer;\n  v_reservation_count integer;\n  v_settlement_count integer;\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM public.admins\n    WHERE id = auth.uid() AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT * INTO v_owner\n  FROM public.business_owners\n  WHERE id = p_business_owner_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'BUSINESS_OWNER_NOT_FOUND';\n  END IF;\n  IF btrim(COALESCE(p_confirmation_name, '')) <> v_owner.name THEN\n    RAISE EXCEPTION 'CONFIRMATION_NAME_MISMATCH';\n  END IF;\n\n  SELECT count(*) INTO v_product_count FROM public.products\n  WHERE business_owner_id = p_business_owner_id;\n  SELECT count(*) INTO v_reservation_count FROM public.reservations\n  WHERE business_owner_id = p_business_owner_id;\n  SELECT count(*) INTO v_settlement_count FROM public.settlements\n  WHERE business_owner_id = p_business_owner_id;\n\n  IF v_product_count > 0 OR v_reservation_count > 0 OR v_settlement_count > 0 THEN\n    RAISE EXCEPTION 'BUSINESS_OWNER_HAS_RELATED_DATA products=% reservations=% settlements=%',\n      v_product_count, v_reservation_count, v_settlement_count;\n  END IF;\n\n  IF v_owner.auth_user_id IS NOT NULL THEN\n    DELETE FROM public.user_roles\n    WHERE id = v_owner.auth_user_id AND role = 'business_owner';\n  END IF;\n\n  DELETE FROM public.business_owners WHERE id = p_business_owner_id;\n\n  RETURN jsonb_build_object(\n    'success', true,\n    'business_owner_id', p_business_owner_id,\n    'name', v_owner.name\n  );\nEND;\n$function$\n",
+      "hash": "f082b3d908dca83d7196588cb56dde3f",
+      "identity": "delete_business_owner_safely(uuid,text)",
+      "member": true,
+      "name": "delete_business_owner_safely",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.change_admin_password(p_current_password text, p_new_password text)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public', 'extensions'\nAS $function$\nDECLARE\n  v_admin public.admins%ROWTYPE;\n  v_current_hash text;\n  v_new_hash text;\nBEGIN\n  IF auth.uid() IS NULL THEN\n    RAISE EXCEPTION 'AUTH_REQUIRED';\n  END IF;\n\n  SELECT *\n  INTO v_admin\n  FROM public.admins\n  WHERE id = auth.uid()\n    AND is_active = true;\n\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'ADMIN_NOT_FOUND';\n  END IF;\n\n  v_current_hash := encode(\n    extensions.digest(p_current_password || 'damda-salt-2024', 'sha256'),\n    'hex'\n  );\n\n  IF v_current_hash <> v_admin.password_hash THEN\n    RAISE EXCEPTION 'CURRENT_PASSWORD_INVALID';\n  END IF;\n\n  IF p_new_password = p_current_password THEN\n    RAISE EXCEPTION 'PASSWORD_REUSE_NOT_ALLOWED';\n  END IF;\n\n  IF length(p_new_password) < 8\n    OR p_new_password !~ '[A-Za-z]'\n    OR p_new_password !~ '[0-9]'\n    OR p_new_password !~ '[^A-Za-z0-9]'\n  THEN\n    RAISE EXCEPTION 'PASSWORD_POLICY_VIOLATION';\n  END IF;\n\n  v_new_hash := encode(\n    extensions.digest(p_new_password || 'damda-salt-2024', 'sha256'),\n    'hex'\n  );\n\n  UPDATE public.admins\n  SET password_hash = v_new_hash,\n      updated_at = now()\n  WHERE id = v_admin.id;\n\n  INSERT INTO public.admin_logs (\n    admin_id,\n    action,\n    target_type,\n    target_id,\n    before_data,\n    after_data\n  ) VALUES (\n    v_admin.id,\n    'update',\n    'admin',\n    v_admin.id,\n    jsonb_build_object('password_changed', false),\n    jsonb_build_object('password_changed', true)\n  );\n\n  RETURN true;\nEND;\n$function$\n",
+      "hash": "e805e0ca277488b913b0ca969e41585c",
+      "identity": "change_admin_password(text,text)",
+      "member": true,
+      "name": "change_admin_password",
+      "owner": "postgres",
+      "returns": "boolean",
+      "security_definer": true,
+      "settings": [
+        "search_path=public, extensions"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.log_partner_onboarding_change()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nBEGIN\n  IF TG_OP = 'INSERT' THEN\n    INSERT INTO public.partner_onboarding_history (onboarding_id, action, actor_id)\n    VALUES (NEW.id, 'created', auth.uid());\n  ELSIF OLD.status IS DISTINCT FROM NEW.status THEN\n    INSERT INTO public.partner_onboarding_history (onboarding_id, action, note, actor_id)\n    VALUES (NEW.id, 'status_changed', OLD.status || ' -> ' || NEW.status, auth.uid());\n  END IF;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "8dfafd96a208c212fe4bfbf50ec8262e",
+      "identity": "log_partner_onboarding_change()",
+      "member": true,
+      "name": "log_partner_onboarding_change",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.approve_partner_onboarding(p_onboarding_id uuid)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_onboarding public.partner_onboardings%ROWTYPE;\n  v_signup public.business_owner_signup_requests%ROWTYPE;\n  v_owner_id uuid := gen_random_uuid();\n  v_product record;\n  v_product_id uuid;\n  v_image text;\n  v_option jsonb;\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid()) THEN\n    RAISE EXCEPTION '관리자만 입점을 승인할 수 있습니다.';\n  END IF;\n\n  SELECT * INTO v_onboarding\n  FROM public.partner_onboardings\n  WHERE id = p_onboarding_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN RAISE EXCEPTION '입점 신청을 찾을 수 없습니다.'; END IF;\n  IF v_onboarding.status = 'approved' THEN\n    RETURN jsonb_build_object('success', true, 'business_owner_id', v_onboarding.business_owner_id);\n  END IF;\n  IF v_onboarding.status <> 'ready_for_approval' THEN RAISE EXCEPTION '승인 대기 상태가 아닙니다.'; END IF;\n  IF v_onboarding.contract_status <> 'completed' THEN RAISE EXCEPTION '계약이 완료되지 않았습니다.'; END IF;\n  IF v_onboarding.signup_request_id IS NULL THEN RAISE EXCEPTION '사업주 콘솔 가입 계정이 연결되지 않았습니다.'; END IF;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.partner_onboarding_documents\n    WHERE onboarding_id = p_onboarding_id AND document_type = 'business_registration'\n  ) OR NOT EXISTS (\n    SELECT 1 FROM public.partner_onboarding_documents\n    WHERE onboarding_id = p_onboarding_id AND document_type = 'bank_account'\n  ) THEN RAISE EXCEPTION '필수 서류가 누락되었습니다.'; END IF;\n  IF NOT EXISTS (SELECT 1 FROM public.partner_onboarding_products WHERE onboarding_id = p_onboarding_id) THEN\n    RAISE EXCEPTION '등록할 상품이 없습니다.';\n  END IF;\n  IF (SELECT count(*) FROM public.partner_onboarding_products WHERE onboarding_id = p_onboarding_id) > 10 THEN\n    RAISE EXCEPTION '사업주별 상품은 최대 10개까지 등록할 수 있습니다.';\n  END IF;\n\n  SELECT * INTO v_signup\n  FROM public.business_owner_signup_requests\n  WHERE id = v_onboarding.signup_request_id\n  FOR UPDATE;\n\n  IF NOT FOUND OR v_signup.status <> 'pending' THEN RAISE EXCEPTION '유효한 가입 신청이 아닙니다.'; END IF;\n  IF regexp_replace(v_signup.business_number, '[^0-9]', '', 'g') <> v_onboarding.business_number THEN\n    RAISE EXCEPTION '가입 신청과 입점 신청의 사업자번호가 일치하지 않습니다.';\n  END IF;\n  IF lower(btrim(v_signup.email)) <> lower(btrim(v_onboarding.email)) THEN\n    RAISE EXCEPTION '가입 신청과 입점 신청의 이메일이 일치하지 않습니다.';\n  END IF;\n  IF EXISTS (SELECT 1 FROM public.business_owners WHERE business_number = v_onboarding.business_number) THEN\n    RAISE EXCEPTION '이미 등록된 사업자번호입니다.';\n  END IF;\n\n  UPDATE public.partner_onboardings SET status = 'approving', updated_at = now()\n  WHERE id = p_onboarding_id;\n\n  INSERT INTO public.business_owners (\n    id, auth_user_id, owner_code, email, name, business_number, representative,\n    contact_name, contact_phone, address, address_detail, zipcode,\n    bank_name, bank_account, bank_holder, tax_email, commission_rate, status\n  ) VALUES (\n    v_owner_id, v_signup.auth_user_id, v_onboarding.owner_code, v_signup.email, v_onboarding.business_name,\n    v_onboarding.business_number, v_onboarding.representative, v_onboarding.contact_name,\n    v_onboarding.contact_phone, v_onboarding.address, v_onboarding.address_detail,\n    v_onboarding.zipcode, v_onboarding.bank_name, v_onboarding.bank_account,\n    v_onboarding.bank_holder, v_onboarding.tax_email, v_onboarding.commission_rate, 'active'\n  );\n\n  INSERT INTO public.business_owner_documents (\n    business_owner_id, document_type, file_name, file_url, file_size, mime_type,\n    storage_bucket, storage_path, sort_order\n  )\n  SELECT v_owner_id, document_type, file_name, storage_path, file_size, mime_type,\n         'partner-onboarding-documents', storage_path,\n         CASE WHEN document_type = 'business_registration' THEN 0 ELSE 1 END\n  FROM public.partner_onboarding_documents WHERE onboarding_id = p_onboarding_id;\n\n  FOR v_product IN\n    SELECT * FROM public.partner_onboarding_products\n    WHERE onboarding_id = p_onboarding_id ORDER BY sort_order, created_at\n  LOOP\n    INSERT INTO public.products (\n      business_owner_id, category_id, name, summary, description, thumbnail,\n      original_price, sale_price, min_participants, max_participants,\n      duration_minutes, address, address_detail, region, is_visible\n    ) VALUES (\n      v_owner_id, v_product.category_id, v_product.name, v_product.summary,\n      v_product.description, v_product.thumbnail, v_product.original_price,\n      v_product.sale_price, v_product.min_participants, v_product.max_participants,\n      v_product.duration_minutes, v_product.address, v_product.address_detail,\n      v_product.region, false\n    ) RETURNING id INTO v_product_id;\n\n    FOR v_image IN SELECT jsonb_array_elements_text(v_product.image_urls)\n    LOOP\n      INSERT INTO public.product_images (product_id, image_url, sort_order)\n      VALUES (v_product_id, v_image, 0);\n    END LOOP;\n    FOR v_option IN SELECT value FROM jsonb_array_elements(v_product.options)\n    LOOP\n      INSERT INTO public.product_options (product_id, name, price, is_required, sort_order)\n      VALUES (\n        v_product_id,\n        v_option->>'name',\n        COALESCE((v_option->>'price')::integer, 0),\n        COALESCE((v_option->>'is_required')::boolean, false),\n        COALESCE((v_option->>'sort_order')::integer, 0)\n      );\n    END LOOP;\n  END LOOP;\n\n  INSERT INTO public.user_roles (id, role) VALUES (v_signup.auth_user_id, 'business_owner')\n  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;\n\n  UPDATE public.business_owner_signup_requests\n  SET status = 'approved', matched_business_owner_id = v_owner_id,\n      reviewed_by = auth.uid(), reviewed_at = now(), updated_at = now()\n  WHERE id = v_signup.id;\n\n  UPDATE public.partner_onboardings\n  SET status = 'approved', business_owner_id = v_owner_id,\n      approved_by = auth.uid(), approved_at = now(), updated_at = now()\n  WHERE id = p_onboarding_id;\n\n  RETURN jsonb_build_object('success', true, 'business_owner_id', v_owner_id);\nEND;\n$function$\n",
+      "hash": "3f4722424b7e4199aff4bd509aefc9be",
+      "identity": "approve_partner_onboarding(uuid)",
+      "member": true,
+      "name": "approve_partner_onboarding",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_business_owner_signup_request()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_business_registration jsonb;\n  v_bank_account_document jsonb;\nBEGIN\n  IF COALESCE(NEW.raw_user_meta_data->>'account_type', '') = 'business_owner_signup' THEN\n    v_business_registration := COALESCE(NEW.raw_user_meta_data->'business_registration_document', '{}'::jsonb);\n    v_bank_account_document := COALESCE(NEW.raw_user_meta_data->'bank_account_document', '{}'::jsonb);\n\n    INSERT INTO public.business_owner_signup_requests (\n      auth_user_id,\n      email,\n      business_name,\n      business_number,\n      representative,\n      contact_name,\n      contact_phone,\n      bank_name,\n      bank_holder,\n      bank_account,\n      business_registration_storage_bucket,\n      business_registration_storage_path,\n      business_registration_file_name,\n      business_registration_file_size,\n      business_registration_mime_type,\n      bank_account_copy_storage_bucket,\n      bank_account_copy_storage_path,\n      bank_account_copy_file_name,\n      bank_account_copy_file_size,\n      bank_account_copy_mime_type\n    ) VALUES (\n      NEW.id,\n      lower(btrim(NEW.email)),\n      NEW.raw_user_meta_data->>'business_name',\n      regexp_replace(NEW.raw_user_meta_data->>'business_number', '[^0-9]', '', 'g'),\n      NEW.raw_user_meta_data->>'representative',\n      NEW.raw_user_meta_data->>'contact_name',\n      regexp_replace(NEW.raw_user_meta_data->>'contact_phone', '[^0-9]', '', 'g'),\n      NULLIF(btrim(NEW.raw_user_meta_data->>'bank_name'), ''),\n      NULLIF(btrim(NEW.raw_user_meta_data->>'bank_holder'), ''),\n      NULLIF(regexp_replace(NEW.raw_user_meta_data->>'bank_account', '[^0-9]', '', 'g'), ''),\n      NULLIF(v_business_registration->>'storage_bucket', ''),\n      NULLIF(v_business_registration->>'storage_path', ''),\n      NULLIF(v_business_registration->>'file_name', ''),\n      CASE WHEN (v_business_registration->>'file_size') ~ '^[0-9]+$'\n        THEN (v_business_registration->>'file_size')::bigint ELSE NULL END,\n      NULLIF(v_business_registration->>'mime_type', ''),\n      NULLIF(v_bank_account_document->>'storage_bucket', ''),\n      NULLIF(v_bank_account_document->>'storage_path', ''),\n      NULLIF(v_bank_account_document->>'file_name', ''),\n      CASE WHEN (v_bank_account_document->>'file_size') ~ '^[0-9]+$'\n        THEN (v_bank_account_document->>'file_size')::bigint ELSE NULL END,\n      NULLIF(v_bank_account_document->>'mime_type', '')\n    )\n    ON CONFLICT (auth_user_id) DO UPDATE SET\n      email = EXCLUDED.email,\n      business_name = EXCLUDED.business_name,\n      business_number = EXCLUDED.business_number,\n      representative = EXCLUDED.representative,\n      contact_name = EXCLUDED.contact_name,\n      contact_phone = EXCLUDED.contact_phone,\n      bank_name = EXCLUDED.bank_name,\n      bank_holder = EXCLUDED.bank_holder,\n      bank_account = EXCLUDED.bank_account,\n      business_registration_storage_bucket = EXCLUDED.business_registration_storage_bucket,\n      business_registration_storage_path = EXCLUDED.business_registration_storage_path,\n      business_registration_file_name = EXCLUDED.business_registration_file_name,\n      business_registration_file_size = EXCLUDED.business_registration_file_size,\n      business_registration_mime_type = EXCLUDED.business_registration_mime_type,\n      bank_account_copy_storage_bucket = EXCLUDED.bank_account_copy_storage_bucket,\n      bank_account_copy_storage_path = EXCLUDED.bank_account_copy_storage_path,\n      bank_account_copy_file_name = EXCLUDED.bank_account_copy_file_name,\n      bank_account_copy_file_size = EXCLUDED.bank_account_copy_file_size,\n      bank_account_copy_mime_type = EXCLUDED.bank_account_copy_mime_type,\n      updated_at = now();\n  END IF;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "a266c8d5c7be34d7b65077ea06b6a039",
+      "identity": "create_business_owner_signup_request()",
+      "member": true,
+      "name": "create_business_owner_signup_request",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_primary_business_for_owner()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nBEGIN\n  INSERT INTO public.businesses (\n    id, business_owner_id, business_code, name, business_number, representative,\n    contact_name, contact_phone, email, address, address_detail, zipcode,\n    latitude, longitude, logo_url, status, is_primary\n  ) VALUES (\n    NEW.id, NEW.id, public.make_business_code(NEW.id), NEW.name, NEW.business_number,\n    NEW.representative, NEW.contact_name, NEW.contact_phone, NEW.email, NEW.address,\n    NEW.address_detail, NEW.zipcode, NEW.latitude, NEW.longitude, NEW.logo_url,\n    NEW.status, true\n  ) ON CONFLICT (id) DO NOTHING;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "85c270a64a66f477ac63e0d1216d45e6",
+      "identity": "create_primary_business_for_owner()",
+      "member": true,
+      "name": "create_primary_business_for_owner",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.delete_business_safely(p_business_id uuid, p_confirmation_name text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE v_business public.businesses%ROWTYPE; v_products integer; v_reservations integer;\nBEGIN\n  SELECT * INTO v_business FROM public.businesses WHERE id = p_business_id FOR UPDATE;\n  IF NOT FOUND THEN RAISE EXCEPTION 'BUSINESS_NOT_FOUND'; END IF;\n  IF NOT (v_business.business_owner_id = public.current_business_owner_id()\n          OR EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid() AND is_active = true)) THEN\n    RAISE EXCEPTION 'BUSINESS_ACCESS_DENIED';\n  END IF;\n  IF btrim(COALESCE(p_confirmation_name, '')) <> v_business.name THEN\n    RAISE EXCEPTION 'CONFIRMATION_NAME_MISMATCH';\n  END IF;\n  SELECT count(*) INTO v_products FROM public.products WHERE business_id = p_business_id;\n  SELECT count(*) INTO v_reservations FROM public.reservations WHERE business_id = p_business_id;\n  IF v_products > 0 OR v_reservations > 0 OR v_business.is_primary THEN\n    RAISE EXCEPTION 'BUSINESS_HAS_RELATED_DATA_OR_IS_PRIMARY products=% reservations=%', v_products, v_reservations;\n  END IF;\n  DELETE FROM public.businesses WHERE id = p_business_id;\n  RETURN jsonb_build_object('success', true, 'business_id', p_business_id);\nEND;\n$function$\n",
+      "hash": "3aaf5cf5e95aa1c1ff5ba3cd512b50ca",
+      "identity": "delete_business_safely(uuid,text)",
+      "member": true,
+      "name": "delete_business_safely",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.prepare_generated_document()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_reservation public.reservations%ROWTYPE;\nBEGIN\n  IF NEW.document_number IS NULL OR btrim(NEW.document_number) = '' THEN\n    NEW.document_number := public.next_generated_document_number(NEW.document_type);\n  END IF;\n\n  IF NEW.reservation_id IS NOT NULL THEN\n    SELECT * INTO v_reservation FROM public.reservations WHERE id = NEW.reservation_id;\n    IF NOT FOUND THEN RAISE EXCEPTION 'DOCUMENT_RESERVATION_NOT_FOUND'; END IF;\n    IF auth.uid() IS NOT NULL AND v_reservation.daycare_id <> auth.uid()\n       AND NOT EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid() AND is_active = true) THEN\n      RAISE EXCEPTION 'DOCUMENT_RESERVATION_ACCESS_DENIED';\n    END IF;\n    NEW.daycare_id := v_reservation.daycare_id;\n    NEW.business_owner_id := v_reservation.business_owner_id;\n    NEW.business_id := v_reservation.business_id;\n  ELSIF auth.uid() IS NOT NULL\n        AND NEW.daycare_id <> auth.uid()\n        AND NOT EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid() AND is_active = true) THEN\n    RAISE EXCEPTION 'DOCUMENT_DAYCARE_ACCESS_DENIED';\n  END IF;\n\n  IF TG_OP = 'UPDATE' AND OLD.status = 'issued' THEN\n    IF NEW.reservation_snapshot IS DISTINCT FROM OLD.reservation_snapshot\n       OR NEW.publisher_snapshot IS DISTINCT FROM OLD.publisher_snapshot\n       OR NEW.editable_content IS DISTINCT FROM OLD.editable_content THEN\n      RAISE EXCEPTION 'ISSUED_DOCUMENT_IS_IMMUTABLE';\n    END IF;\n  END IF;\n\n  IF NEW.status = 'issued' AND NEW.issued_at IS NULL THEN NEW.issued_at := now(); END IF;\n  NEW.updated_at := now();\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "28b128eddee38ecf50772c1a4869dc31",
+      "identity": "prepare_generated_document()",
+      "member": true,
+      "name": "prepare_generated_document",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.approve_business_owner_signup(p_request_id uuid, p_business_owner_id uuid)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_request public.business_owner_signup_requests%ROWTYPE;\n  v_owner public.business_owners%ROWTYPE;\n  v_previous_auth_user_id uuid;\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM public.admins\n    WHERE id = auth.uid() AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT * INTO v_request\n  FROM public.business_owner_signup_requests\n  WHERE id = p_request_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUEST_NOT_FOUND';\n  END IF;\n  IF v_request.status NOT IN ('pending', 'on_hold', 'rejected') THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUEST_ALREADY_PROCESSED';\n  END IF;\n\n  SELECT * INTO v_owner\n  FROM public.business_owners\n  WHERE id = p_business_owner_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'BUSINESS_OWNER_NOT_FOUND';\n  END IF;\n  IF lower(btrim(v_request.email)) <> lower(btrim(v_owner.email)) THEN\n    RAISE EXCEPTION 'BUSINESS_OWNER_EMAIL_MISMATCH';\n  END IF;\n\n  v_previous_auth_user_id := v_owner.auth_user_id;\n\n  UPDATE public.business_owners\n  SET auth_user_id = v_request.auth_user_id,\n      bank_name = COALESCE(NULLIF(btrim(v_request.bank_name), ''), bank_name),\n      bank_holder = COALESCE(NULLIF(btrim(v_request.bank_holder), ''), bank_holder),\n      bank_account = COALESCE(NULLIF(v_request.bank_account, ''), bank_account),\n      status = 'active',\n      updated_at = now()\n  WHERE id = p_business_owner_id;\n\n  IF v_request.business_registration_storage_path IS NOT NULL THEN\n    DELETE FROM public.business_owner_documents\n    WHERE business_owner_id = p_business_owner_id AND document_type = 'business_registration';\n\n    INSERT INTO public.business_owner_documents (\n      business_owner_id, document_type, file_name, file_url, file_size, mime_type,\n      storage_bucket, storage_path, sort_order\n    ) VALUES (\n      p_business_owner_id,\n      'business_registration',\n      COALESCE(v_request.business_registration_file_name, '사업자등록증'),\n      v_request.business_registration_storage_path,\n      v_request.business_registration_file_size,\n      v_request.business_registration_mime_type,\n      COALESCE(v_request.business_registration_storage_bucket, 'business-signup-documents'),\n      v_request.business_registration_storage_path,\n      0\n    );\n  END IF;\n\n  IF v_request.bank_account_copy_storage_path IS NOT NULL THEN\n    DELETE FROM public.business_owner_documents\n    WHERE business_owner_id = p_business_owner_id AND document_type = 'bank_account';\n\n    INSERT INTO public.business_owner_documents (\n      business_owner_id, document_type, file_name, file_url, file_size, mime_type,\n      storage_bucket, storage_path, sort_order\n    ) VALUES (\n      p_business_owner_id,\n      'bank_account',\n      COALESCE(v_request.bank_account_copy_file_name, '통장사본'),\n      v_request.bank_account_copy_storage_path,\n      v_request.bank_account_copy_file_size,\n      v_request.bank_account_copy_mime_type,\n      COALESCE(v_request.bank_account_copy_storage_bucket, 'business-signup-documents'),\n      v_request.bank_account_copy_storage_path,\n      1\n    );\n  END IF;\n\n  IF v_previous_auth_user_id IS NOT NULL\n     AND v_previous_auth_user_id <> v_request.auth_user_id THEN\n    DELETE FROM public.user_roles\n    WHERE id = v_previous_auth_user_id AND role = 'business_owner';\n  END IF;\n\n  INSERT INTO public.user_roles (id, role)\n  VALUES (v_request.auth_user_id, 'business_owner')\n  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;\n\n  UPDATE public.business_owner_signup_requests\n  SET status = 'approved',\n      matched_business_owner_id = p_business_owner_id,\n      reviewed_by = auth.uid(),\n      reviewed_at = now(),\n      updated_at = now()\n  WHERE id = p_request_id;\n\n  RETURN jsonb_build_object(\n    'success', true,\n    'business_owner_id', p_business_owner_id,\n    'auth_user_id', v_request.auth_user_id,\n    'owner_code', v_owner.owner_code,\n    'email', v_owner.email\n  );\nEND;\n$function$\n",
+      "hash": "a77f10e266d9d35ee5fe3b627261edf8",
+      "identity": "approve_business_owner_signup(uuid,uuid)",
+      "member": true,
+      "name": "approve_business_owner_signup",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.guard_sensitive_profile_fields()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'pg_temp'\nAS $function$\r\nBEGIN\r\n  IF public.is_active_admin() OR auth.role() = 'service_role' THEN\r\n    RETURN NEW;\r\n  END IF;\r\n  IF TG_TABLE_NAME = 'daycares' THEN\r\n    IF NEW.id IS DISTINCT FROM auth.uid() THEN\r\n      RAISE EXCEPTION 'Only the applicant can edit this profile' USING ERRCODE='42501';\r\n    END IF;\r\n    IF TG_OP = 'INSERT' THEN\r\n      IF NEW.status IS DISTINCT FROM 'pending' OR NEW.approved_at IS NOT NULL\r\n        OR NEW.rejection_reason IS NOT NULL OR NEW.revision_reason IS NOT NULL\r\n        OR NEW.revision_requested_at IS NOT NULL OR NEW.deleted_at IS NOT NULL OR NEW.deleted_by IS NOT NULL THEN\r\n        RAISE EXCEPTION 'Only an administrator can approve an application' USING ERRCODE='42501';\r\n      END IF;\r\n    ELSE\r\n      IF NEW.id IS DISTINCT FROM OLD.id OR NEW.email IS DISTINCT FROM OLD.email\r\n        OR NEW.approved_at IS DISTINCT FROM OLD.approved_at\r\n        OR NEW.rejection_reason IS DISTINCT FROM OLD.rejection_reason\r\n        OR NEW.revision_reason IS DISTINCT FROM OLD.revision_reason\r\n        OR NEW.revision_requested_at IS DISTINCT FROM OLD.revision_requested_at\r\n        OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.deleted_by IS DISTINCT FROM OLD.deleted_by\r\n        OR (NEW.status IS DISTINCT FROM OLD.status AND NOT (\r\n          OLD.status = 'revision_required' AND NEW.status = 'requested'\r\n          AND NEW.revision_submitted_at IS NOT NULL\r\n        )) THEN\r\n        RAISE EXCEPTION 'Only an administrator can change approval information' USING ERRCODE='42501';\r\n      END IF;\r\n    END IF;\r\n  ELSIF TG_TABLE_NAME = 'business_owners' THEN\r\n    IF NEW.commission_rate IS DISTINCT FROM OLD.commission_rate\r\n      OR NEW.status IS DISTINCT FROM OLD.status\r\n      OR NEW.business_number IS DISTINCT FROM OLD.business_number\r\n      OR NEW.email IS DISTINCT FROM OLD.email THEN\r\n      RAISE EXCEPTION 'Only an administrator can change business privileges' USING ERRCODE='42501';\r\n    END IF;\r\n  END IF;\r\n  RETURN NEW;\r\nEND;\r\n$function$\n",
+      "hash": "901b0a814d3dcb9851c6d433c18d423f",
+      "identity": "guard_sensitive_profile_fields()",
+      "member": true,
+      "name": "guard_sensitive_profile_fields",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.get_site_analytics(p_start_date date, p_end_date date)\n RETURNS TABLE(metric_date date, daily_visits bigint, partner_cta_clicks bigint, signup_cta_clicks bigint)\n LANGUAGE plpgsql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1\n    FROM public.admins\n    WHERE id = auth.uid()\n      AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  IF p_start_date IS NULL OR p_end_date IS NULL OR p_end_date < p_start_date OR p_end_date - p_start_date > 370 THEN\n    RAISE EXCEPTION 'INVALID_ANALYTICS_DATE_RANGE';\n  END IF;\n\n  RETURN QUERY\n  SELECT\n    day::date,\n    coalesce(max(m.metric_count) FILTER (WHERE m.metric_key = 'daily_visit'), 0)::bigint,\n    coalesce(max(m.metric_count) FILTER (WHERE m.metric_key = 'partner_cta_click'), 0)::bigint,\n    coalesce(max(m.metric_count) FILTER (WHERE m.metric_key = 'signup_cta_click'), 0)::bigint\n  FROM generate_series(p_start_date, p_end_date, interval '1 day') day\n  LEFT JOIN public.site_daily_metrics m ON m.metric_date = day::date\n  GROUP BY day\n  ORDER BY day;\nEND;\n$function$\n",
+      "hash": "c32ae1f32b6bbcb9b69cde32834d4c68",
+      "identity": "get_site_analytics(date,date)",
+      "member": true,
+      "name": "get_site_analytics",
+      "owner": "postgres",
+      "returns": "TABLE(metric_date date, daily_visits bigint, partner_cta_clicks bigint, signup_cta_clicks bigint)",
+      "security_definer": true,
+      "settings": [
+        "search_path=\"\""
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_secure_payment_order(p_items jsonb, p_reserver_info jsonb, p_payment_method text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_daycare_id uuid := auth.uid();\n  v_item jsonb;\n  v_option_input jsonb;\n  v_product public.products%ROWTYPE;\n  v_option public.product_options%ROWTYPE;\n  v_product_id uuid;\n  v_reserved_date date;\n  v_participants integer;\n  v_quantity integer;\n  v_item_total integer;\n  v_total integer := 0;\n  v_snapshot jsonb := '[]'::jsonb;\n  v_options jsonb;\n  v_order_id text;\n  v_goods_name text;\n  v_item_count integer := 0;\nBEGIN\n  IF v_daycare_id IS NULL OR NOT public.is_daycare() THEN\n    RAISE EXCEPTION '승인된 보육기관 회원만 결제할 수 있습니다.';\n  END IF;\n  IF jsonb_typeof(p_items) <> 'array' OR jsonb_array_length(p_items) = 0 OR jsonb_array_length(p_items) > 20 THEN\n    RAISE EXCEPTION '주문 상품 정보가 올바르지 않습니다.';\n  END IF;\n  IF p_payment_method NOT IN ('card', 'bank') THEN\n    RAISE EXCEPTION '결제수단이 올바르지 않습니다.';\n  END IF;\n  IF NULLIF(trim(COALESCE(p_reserver_info ->> 'name', '')), '') IS NULL\n     OR NULLIF(trim(COALESCE(p_reserver_info ->> 'phone', '')), '') IS NULL THEN\n    RAISE EXCEPTION '예약자 정보가 올바르지 않습니다.';\n  END IF;\n\n  FOR v_item IN SELECT value FROM jsonb_array_elements(p_items)\n  LOOP\n    v_product_id := NULLIF(v_item ->> 'productId', '')::uuid;\n    v_reserved_date := NULLIF(v_item ->> 'reservedDate', '')::date;\n    v_participants := (v_item ->> 'participants')::integer;\n    IF v_product_id IS NULL OR v_reserved_date IS NULL OR v_participants IS NULL OR v_participants < 1 THEN\n      RAISE EXCEPTION '상품 또는 예약 인원 정보가 올바르지 않습니다.';\n    END IF;\n    SELECT * INTO v_product FROM public.products WHERE id = v_product_id FOR SHARE;\n    IF NOT FOUND OR NOT v_product.is_visible OR v_product.is_sold_out THEN\n      RAISE EXCEPTION '예약할 수 없는 상품입니다.';\n    END IF;\n    IF v_reserved_date < CURRENT_DATE OR v_participants < v_product.min_participants OR v_participants > v_product.max_participants THEN\n      RAISE EXCEPTION '예약 날짜 또는 인원이 상품 조건에 맞지 않습니다.';\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.product_unavailable_dates u\n      WHERE u.product_id = v_product_id AND u.unavailable_date = v_reserved_date\n    ) THEN\n      RAISE EXCEPTION '선택한 날짜는 예약할 수 없습니다.';\n    END IF;\n    IF NOT EXISTS (\n      SELECT 1 FROM public.reservation_holds h\n      WHERE h.product_id = v_product_id\n        AND h.reserved_date = v_reserved_date\n        AND h.daycare_id = v_daycare_id\n        AND h.expires_at > now()\n    ) THEN\n      RAISE EXCEPTION '결제 대기 시간이 만료되었습니다. 다시 시도해주세요.';\n    END IF;\n\n    v_item_total := v_product.sale_price * v_participants;\n    v_options := '[]'::jsonb;\n    FOR v_option_input IN SELECT value FROM jsonb_array_elements(COALESCE(v_item -> 'options', '[]'::jsonb))\n    LOOP\n      v_quantity := (v_option_input ->> 'quantity')::integer;\n      IF v_quantity IS NULL OR v_quantity < 1 OR v_quantity > 100 THEN\n        RAISE EXCEPTION '옵션 수량이 올바르지 않습니다.';\n      END IF;\n      SELECT * INTO v_option FROM public.product_options\n      WHERE id = NULLIF(v_option_input ->> 'id', '')::uuid AND product_id = v_product_id;\n      IF NOT FOUND THEN\n        RAISE EXCEPTION '상품 옵션 정보가 올바르지 않습니다.';\n      END IF;\n      v_item_total := v_item_total + (v_option.price * v_quantity);\n      v_options := v_options || jsonb_build_array(jsonb_build_object(\n        'id', v_option.id, 'name', v_option.name, 'price', v_option.price, 'quantity', v_quantity\n      ));\n    END LOOP;\n\n    v_snapshot := v_snapshot || jsonb_build_array(jsonb_build_object(\n      'productId', v_product.id,\n      'productName', v_product.name,\n      'businessOwnerId', v_product.business_owner_id,\n      'reservedDate', v_reserved_date,\n      'reservedTime', NULLIF(v_item ->> 'reservedTime', ''),\n      'participants', v_participants,\n      'options', v_options,\n      'totalAmount', v_item_total\n    ));\n    v_total := v_total + v_item_total;\n    v_item_count := v_item_count + 1;\n    IF v_item_count = 1 THEN v_goods_name := v_product.name; END IF;\n  END LOOP;\n\n  v_order_id := 'ORD' || to_char(clock_timestamp(), 'YYYYMMDDHH24MISSMS') || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));\n  INSERT INTO public.payment_orders(order_id, daycare_id, items, reserver_info, payment_method, amount)\n  VALUES (v_order_id, v_daycare_id, v_snapshot, p_reserver_info, p_payment_method, v_total);\n  RETURN jsonb_build_object(\n    'orderId', v_order_id,\n    'amount', v_total,\n    'goodsName', CASE WHEN v_item_count > 1 THEN v_goods_name || ' 외 ' || (v_item_count - 1) || '건' ELSE v_goods_name END\n  );\nEND;\n$function$\n",
+      "hash": "2dd8988a4fed70d7ff649694da28086e",
+      "identity": "create_secure_payment_order(jsonb,jsonb,text)",
+      "member": true,
+      "name": "create_secure_payment_order",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_admin_product_preview_token(p_product_id uuid)\n RETURNS TABLE(token uuid, expires_at timestamp with time zone)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nDECLARE\r\n  v_business_owner_id uuid;\r\nBEGIN\r\n  IF NOT EXISTS (\r\n    SELECT 1 FROM public.admins\r\n    WHERE id = auth.uid() AND is_active = true\r\n  ) THEN\r\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\r\n  END IF;\r\n  SELECT p.business_owner_id INTO v_business_owner_id\r\n  FROM public.products p WHERE p.id = p_product_id;\r\n  IF v_business_owner_id IS NULL THEN\r\n    RAISE EXCEPTION 'PRODUCT_NOT_FOUND';\r\n  END IF;\r\n  DELETE FROM public.product_preview_tokens ppt\r\n  WHERE ppt.product_id = p_product_id AND ppt.expires_at <= now();\r\n  RETURN QUERY\r\n  INSERT INTO public.product_preview_tokens(product_id, business_owner_id)\r\n  VALUES (p_product_id, v_business_owner_id)\r\n  RETURNING product_preview_tokens.token, product_preview_tokens.expires_at;\r\nEND;\r\n$function$\n",
+      "hash": "81c39081b50764e6df4d5540755f7b42",
+      "identity": "create_admin_product_preview_token(uuid)",
+      "member": true,
+      "name": "create_admin_product_preview_token",
+      "owner": "postgres",
+      "returns": "TABLE(token uuid, expires_at timestamp with time zone)",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.review_business_owner_signup(p_request_id uuid, p_status text, p_review_note text DEFAULT NULL::text, p_business_owner_id uuid DEFAULT NULL::uuid)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_request public.business_owner_signup_requests%ROWTYPE;\n  v_business_owner_id uuid;\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM public.admins\n    WHERE id = auth.uid() AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT * INTO v_request\n  FROM public.business_owner_signup_requests\n  WHERE id = p_request_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUEST_NOT_FOUND';\n  END IF;\n\n  IF p_status = 'approved' THEN\n    IF v_request.status = 'approved' THEN\n      UPDATE public.business_owner_signup_requests\n      SET review_note = NULLIF(btrim(p_review_note), ''),\n          reviewed_by = auth.uid(),\n          reviewed_at = now(),\n          updated_at = now()\n      WHERE id = p_request_id;\n      RETURN jsonb_build_object('success', true, 'status', 'approved');\n    END IF;\n\n    v_business_owner_id := COALESCE(\n      v_request.matched_business_owner_id,\n      p_business_owner_id\n    );\n\n    IF v_business_owner_id IS NOT NULL\n       AND NOT EXISTS (\n         SELECT 1 FROM public.business_owners\n         WHERE id = v_business_owner_id\n       ) THEN\n      IF v_business_owner_id <> v_request.auth_user_id THEN\n        RAISE EXCEPTION 'BUSINESS_OWNER_NOT_FOUND';\n      END IF;\n      v_business_owner_id := NULL;\n    END IF;\n\n    IF v_business_owner_id IS NULL THEN\n      SELECT id INTO v_business_owner_id\n      FROM public.business_owners\n      WHERE auth_user_id = v_request.auth_user_id\n      LIMIT 1\n      FOR UPDATE;\n    END IF;\n\n    IF v_business_owner_id IS NULL THEN\n      IF EXISTS (\n        SELECT 1 FROM public.business_owners\n        WHERE lower(btrim(email)) = lower(btrim(v_request.email))\n           OR business_number = v_request.business_number\n      ) THEN\n        RAISE EXCEPTION 'BUSINESS_OWNER_SIGNUP_CONFLICT';\n      END IF;\n\n      INSERT INTO public.business_owners (\n        id,\n        auth_user_id,\n        email,\n        name,\n        business_number,\n        representative,\n        contact_name,\n        contact_phone,\n        address,\n        bank_name,\n        bank_holder,\n        bank_account,\n        status\n      ) VALUES (\n        v_request.auth_user_id,\n        v_request.auth_user_id,\n        lower(btrim(v_request.email)),\n        btrim(v_request.business_name),\n        v_request.business_number,\n        btrim(v_request.representative),\n        btrim(v_request.contact_name),\n        v_request.contact_phone,\n        '',\n        NULLIF(btrim(v_request.bank_name), ''),\n        NULLIF(btrim(v_request.bank_holder), ''),\n        NULLIF(v_request.bank_account, ''),\n        'active'\n      )\n      RETURNING id INTO v_business_owner_id;\n    END IF;\n\n    PERFORM public.approve_business_owner_signup(\n      p_request_id,\n      v_business_owner_id\n    );\n\n    UPDATE public.business_owner_signup_requests\n    SET review_note = NULLIF(btrim(p_review_note), ''),\n        updated_at = now()\n    WHERE id = p_request_id;\n\n    RETURN jsonb_build_object(\n      'success', true,\n      'status', 'approved',\n      'business_owner_id', v_business_owner_id\n    );\n  END IF;\n\n  IF p_status NOT IN ('rejected', 'on_hold') THEN\n    RAISE EXCEPTION 'INVALID_BUSINESS_SIGNUP_STATUS';\n  END IF;\n\n  IF v_request.status = 'approved'\n     AND v_request.matched_business_owner_id IS NOT NULL THEN\n    UPDATE public.business_owners\n    SET status = 'inactive', updated_at = now()\n    WHERE id = v_request.matched_business_owner_id;\n  END IF;\n\n  UPDATE public.business_owner_signup_requests\n  SET status = p_status,\n      review_note = NULLIF(btrim(p_review_note), ''),\n      reviewed_by = auth.uid(),\n      reviewed_at = now(),\n      updated_at = now()\n  WHERE id = p_request_id;\n\n  RETURN jsonb_build_object('success', true, 'status', p_status);\nEND;\n$function$\n",
+      "hash": "a4ccbcb8becf160a69831c801e6b7bb2",
+      "identity": "review_business_owner_signup(uuid,text,text,uuid)",
+      "member": true,
+      "name": "review_business_owner_signup",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.delete_daycare_safely(p_daycare_id uuid, p_confirmation_name text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_daycare public.daycares%ROWTYPE;\n  v_admin_id uuid := auth.uid();\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM public.admins\n    WHERE id = v_admin_id AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT * INTO v_daycare\n  FROM public.daycares\n  WHERE id = p_daycare_id\n  FOR UPDATE;\n\n  IF NOT FOUND OR v_daycare.status = 'deleted' THEN\n    RAISE EXCEPTION 'DAYCARE_NOT_FOUND';\n  END IF;\n\n  IF btrim(coalesce(p_confirmation_name, '')) <> v_daycare.name THEN\n    RAISE EXCEPTION 'CONFIRMATION_NAME_MISMATCH';\n  END IF;\n\n  IF EXISTS (\n    SELECT 1 FROM public.business_owners\n    WHERE auth_user_id = p_daycare_id\n  ) THEN\n    RAISE EXCEPTION 'SHARED_AUTH_ACCOUNT';\n  END IF;\n\n  UPDATE public.daycares\n  SET status = 'deleted',\n      deleted_at = now(),\n      deleted_by = v_admin_id,\n      updated_at = now()\n  WHERE id = p_daycare_id;\n\n  -- Removing the role blocks all role-gated APIs immediately. Removing the Auth user\n  -- prevents future sign-in, while the daycare row remains as a historical reference.\n  DELETE FROM public.user_roles WHERE id = p_daycare_id;\n  DELETE FROM auth.users WHERE id = p_daycare_id;\n\n  INSERT INTO public.admin_logs (\n    admin_id,\n    action,\n    target_type,\n    target_id,\n    before_data\n  ) VALUES (\n    v_admin_id,\n    'delete',\n    'daycare',\n    p_daycare_id,\n    jsonb_build_object(\n      'name', v_daycare.name,\n      'email', v_daycare.email,\n      'previous_status', v_daycare.status,\n      'deletion_mode', 'soft_delete_with_auth_removal'\n    )\n  );\n\n  RETURN jsonb_build_object(\n    'success', true,\n    'daycare_id', p_daycare_id,\n    'name', v_daycare.name\n  );\nEND;\n$function$\n",
+      "hash": "9d0571d7a2b8223370d88e52b22c4f68",
+      "identity": "delete_daycare_safely(uuid,text)",
+      "member": true,
+      "name": "delete_daycare_safely",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=\"\""
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.sync_approved_business_names()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_legal_name text;\nBEGIN\n  IF NEW.status <> 'approved'\n     OR NEW.matched_business_owner_id IS NULL\n     OR (TG_OP = 'UPDATE' AND OLD.status = 'approved') THEN\n    RETURN NEW;\n  END IF;\n\n  v_legal_name := NULLIF(btrim(NEW.legal_name), '');\n\n  UPDATE public.business_owners\n  SET legal_name = coalesce(v_legal_name, legal_name),\n      updated_at = now()\n  WHERE id = NEW.matched_business_owner_id;\n\n  UPDATE public.businesses\n  SET name = btrim(NEW.business_name),\n      legal_name = coalesce(v_legal_name, legal_name),\n      updated_at = now()\n  WHERE business_owner_id = NEW.matched_business_owner_id\n    AND is_primary = true;\n\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "c56343735b184d4192fe303f764f180b",
+      "identity": "sync_approved_business_names()",
+      "member": true,
+      "name": "sync_approved_business_names",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=\"\""
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.attach_signup_business_legal_name()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_legal_name text;\n  v_business_name text;\nBEGIN\n  IF COALESCE(NEW.raw_user_meta_data->>'account_type', '') <> 'business_owner_signup' THEN\n    RETURN NEW;\n  END IF;\n\n  v_legal_name := NULLIF(btrim(NEW.raw_user_meta_data->>'legal_name'), '');\n  v_business_name := NULLIF(btrim(NEW.raw_user_meta_data->>'business_name'), '');\n  IF v_legal_name IS NULL THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_LEGAL_NAME_REQUIRED';\n  END IF;\n  IF v_business_name IS NULL THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_BUSINESS_NAME_REQUIRED';\n  END IF;\n  IF length(v_legal_name) > 200 THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_LEGAL_NAME_TOO_LONG';\n  END IF;\n  IF length(v_business_name) > 200 THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_BUSINESS_NAME_TOO_LONG';\n  END IF;\n\n  UPDATE public.business_owner_signup_requests\n  SET legal_name = v_legal_name,\n      business_name = v_business_name,\n      updated_at = now()\n  WHERE auth_user_id = NEW.id;\n\n  UPDATE public.business_owners\n  SET legal_name = v_legal_name,\n      name = v_business_name,\n      updated_at = now()\n  WHERE auth_user_id = NEW.id;\n\n  UPDATE public.businesses b\n  SET legal_name = v_legal_name,\n      name = v_business_name,\n      updated_at = now()\n  FROM public.business_owners o\n  WHERE b.business_owner_id = o.id\n    AND o.auth_user_id = NEW.id\n    AND b.is_primary = true;\n\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "06222a85e88166b1018f093cb305c10f",
+      "identity": "attach_signup_business_legal_name()",
+      "member": true,
+      "name": "attach_signup_business_legal_name",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    }
+  ],
+  "prod": [
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.check_reservation_available(p_product_id uuid, p_reserved_date date)\n RETURNS json\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nDECLARE\n  v_has_reservation BOOLEAN;\n  v_has_hold BOOLEAN;\n  v_hold_by_self BOOLEAN;\nBEGIN\n  -- 만료된 홀드 정리\n  DELETE FROM reservation_holds WHERE expires_at < now();\n  \n  -- 1. 예약이 있는지 확인\n  SELECT EXISTS (\n    SELECT 1 FROM reservations\n    WHERE product_id = p_product_id\n      AND reserved_date = p_reserved_date\n      AND status IN ('pending', 'paid', 'confirmed')\n  ) INTO v_has_reservation;\n  \n  IF v_has_reservation THEN\n    RETURN json_build_object(\n      'available', false,\n      'reason', 'already_reserved',\n      'message', '해당 날짜에 이미 예약이 있습니다.'\n    );\n  END IF;\n  \n  -- 2. 다른 사용자의 홀드가 있는지 확인\n  SELECT \n    EXISTS (\n      SELECT 1 FROM reservation_holds\n      WHERE product_id = p_product_id\n        AND reserved_date = p_reserved_date\n        AND expires_at > now()\n    ),\n    EXISTS (\n      SELECT 1 FROM reservation_holds\n      WHERE product_id = p_product_id\n        AND reserved_date = p_reserved_date\n        AND expires_at > now()\n        AND daycare_id = auth.uid()\n    )\n  INTO v_has_hold, v_hold_by_self;\n  \n  IF v_has_hold AND NOT v_hold_by_self THEN\n    RETURN json_build_object(\n      'available', false,\n      'reason', 'hold_by_other',\n      'message', '다른 사용자가 결제를 진행 중입니다.'\n    );\n  END IF;\n  \n  RETURN json_build_object(\n    'available', true,\n    'reason', null,\n    'message', null\n  );\nEND;\n$function$\n",
+      "hash": "5ae5bc6abf08e0169bd33aa453269a18",
+      "identity": "check_reservation_available(uuid,date)",
+      "member": true,
+      "name": "check_reservation_available",
+      "owner": "postgres",
+      "returns": "json",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.renew_expiring_product_booking_windows()\n RETURNS integer\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_today date := (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date;\n  v_updated_count integer;\nBEGIN\n  UPDATE public.products\n  SET booking_start_date = v_today,\n      booking_end_date = (v_today + INTERVAL '1 year')::date,\n      updated_at = now()\n  WHERE booking_end_date IS NULL\n     OR booking_end_date <= v_today + 30;\n\n  GET DIAGNOSTICS v_updated_count = ROW_COUNT;\n  RETURN v_updated_count;\nEND;\n$function$\n",
+      "hash": "78730a61621a8ea7fda3981451918866",
+      "identity": "renew_expiring_product_booking_windows()",
+      "member": true,
+      "name": "renew_expiring_product_booking_windows",
+      "owner": "postgres",
+      "returns": "integer",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.sync_primary_business_status_from_owner()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nBEGIN\n  IF NEW.status IS DISTINCT FROM OLD.status THEN\n    UPDATE public.businesses\n    SET status = NEW.status,\n        updated_at = now()\n    WHERE business_owner_id = NEW.id\n      AND is_primary = true\n      AND status IS DISTINCT FROM NEW.status;\n  END IF;\n\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "982a54109805a563e1b2293f8f2d9d88",
+      "identity": "sync_primary_business_status_from_owner()",
+      "member": true,
+      "name": "sync_primary_business_status_from_owner",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.change_admin_password(p_current_password text, p_new_password text)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public', 'extensions'\nAS $function$\r\nDECLARE\r\n  v_admin public.admins%ROWTYPE;\r\n  v_current_hash text;\r\n  v_new_hash text;\r\nBEGIN\r\n  IF auth.uid() IS NULL THEN\r\n    RAISE EXCEPTION 'AUTH_REQUIRED';\r\n  END IF;\r\n\r\n  SELECT *\r\n  INTO v_admin\r\n  FROM public.admins\r\n  WHERE id = auth.uid()\r\n    AND is_active = true;\r\n\r\n  IF NOT FOUND THEN\r\n    RAISE EXCEPTION 'ADMIN_NOT_FOUND';\r\n  END IF;\r\n\r\n  v_current_hash := encode(\r\n    extensions.digest(p_current_password || 'damda-salt-2024', 'sha256'),\r\n    'hex'\r\n  );\r\n\r\n  IF v_current_hash <> v_admin.password_hash THEN\r\n    RAISE EXCEPTION 'CURRENT_PASSWORD_INVALID';\r\n  END IF;\r\n\r\n  IF p_new_password = p_current_password THEN\r\n    RAISE EXCEPTION 'PASSWORD_REUSE_NOT_ALLOWED';\r\n  END IF;\r\n\r\n  IF length(p_new_password) < 8\r\n    OR p_new_password !~ '[A-Za-z]'\r\n    OR p_new_password !~ '[0-9]'\r\n    OR p_new_password !~ '[^A-Za-z0-9]'\r\n  THEN\r\n    RAISE EXCEPTION 'PASSWORD_POLICY_VIOLATION';\r\n  END IF;\r\n\r\n  v_new_hash := encode(\r\n    extensions.digest(p_new_password || 'damda-salt-2024', 'sha256'),\r\n    'hex'\r\n  );\r\n\r\n  UPDATE public.admins\r\n  SET password_hash = v_new_hash,\r\n      updated_at = now()\r\n  WHERE id = v_admin.id;\r\n\r\n  INSERT INTO public.admin_logs (\r\n    admin_id,\r\n    action,\r\n    target_type,\r\n    target_id,\r\n    before_data,\r\n    after_data\r\n  ) VALUES (\r\n    v_admin.id,\r\n    'update',\r\n    'admin',\r\n    v_admin.id,\r\n    jsonb_build_object('password_changed', false),\r\n    jsonb_build_object('password_changed', true)\r\n  );\r\n\r\n  RETURN true;\r\nEND;\r\n$function$\n",
+      "hash": "e805e0ca277488b913b0ca969e41585c",
+      "identity": "change_admin_password(text,text)",
+      "member": true,
+      "name": "change_admin_password",
+      "owner": "postgres",
+      "returns": "boolean",
+      "security_definer": true,
+      "settings": [
+        "search_path=public, extensions"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.add_daycare_role_on_approval()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nBEGIN\n  -- status가 approved로 변경되었을 때만 실행\n  IF NEW.status = 'approved' AND (OLD.status IS NULL OR OLD.status != 'approved') THEN\n    -- auth.users에 존재하는 경우에만 user_roles에 추가\n    IF EXISTS (SELECT 1 FROM auth.users WHERE id = NEW.id) THEN\n      INSERT INTO user_roles (id, role)\n      VALUES (NEW.id, 'daycare')\n      ON CONFLICT (id) DO UPDATE SET role = 'daycare';\n    END IF;\n  END IF;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "51e13ac320563737cce3fbb28264c759",
+      "identity": "add_daycare_role_on_approval()",
+      "member": true,
+      "name": "add_daycare_role_on_approval",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.auto_complete_reservations()\n RETURNS integer\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nDECLARE\n  updated_count integer;\nBEGIN\n  UPDATE reservations\n  SET status = 'completed',\n      updated_at = now()\n  WHERE status = 'confirmed'\n    AND reserved_date < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date;\n\n  GET DIAGNOSTICS updated_count = ROW_COUNT;\n  RETURN updated_count;\nEND;\n$function$\n",
+      "hash": "2e4f569a01d1334338bbebbbca7800aa",
+      "identity": "auto_complete_reservations()",
+      "member": true,
+      "name": "auto_complete_reservations",
+      "owner": "postgres",
+      "returns": "integer",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.auto_confirm_email()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nBEGIN\n  -- 새 사용자의 email_confirmed_at을 현재 시간으로 설정\n  UPDATE auth.users\n  SET email_confirmed_at = NOW()\n  WHERE id = NEW.id AND email_confirmed_at IS NULL;\n  \n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "54e92098ca547009a3509555ddcda979",
+      "identity": "auto_confirm_email()",
+      "member": true,
+      "name": "auto_confirm_email",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.cleanup_expired_holds()\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nBEGIN \n  DELETE FROM reservation_holds WHERE expires_at < now(); \nEND;\n$function$\n",
+      "hash": "ab8acb1f817f5adcd3da4b7dbda189bd",
+      "identity": "cleanup_expired_holds()",
+      "member": true,
+      "name": "cleanup_expired_holds",
+      "owner": "postgres",
+      "returns": "void",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.get_unavailable_dates(p_product_id uuid)\n RETURNS text[]\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public', 'extensions', 'pg_temp'\nAS $function$\nDECLARE\n  result TEXT[];\nBEGIN\n  -- 만료된 홀드 정리\n  DELETE FROM reservation_holds WHERE expires_at < now();\n  \n  -- 예약이 있는 날짜 + 홀드가 있는 날짜 조회\n  SELECT ARRAY_AGG(DISTINCT reserved_date::TEXT)\n  INTO result\n  FROM (\n    -- 예약이 있는 날짜\n    SELECT reserved_date\n    FROM reservations\n    WHERE product_id = p_product_id\n      AND status IN ('pending', 'paid', 'confirmed')\n    \n    UNION\n    \n    -- 홀드가 있는 날짜 (현재 사용자 제외)\n    SELECT reserved_date\n    FROM reservation_holds\n    WHERE product_id = p_product_id\n      AND expires_at > now()\n      AND daycare_id != COALESCE(auth.uid(), '00000000-0000-0000-0000-000000000000'::UUID)\n  ) AS unavailable;\n  \n  RETURN COALESCE(result, ARRAY[]::TEXT[]);\nEND;\n$function$\n",
+      "hash": "e162a80832c9211f26bb45410825dd20",
+      "identity": "get_unavailable_dates(uuid)",
+      "member": true,
+      "name": "get_unavailable_dates",
+      "owner": "postgres",
+      "returns": "text[]",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, public, extensions, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.log_partner_onboarding_change()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nBEGIN\r\n  IF TG_OP = 'INSERT' THEN\r\n    INSERT INTO public.partner_onboarding_history (onboarding_id, action, actor_id)\r\n    VALUES (NEW.id, 'created', auth.uid());\r\n  ELSIF OLD.status IS DISTINCT FROM NEW.status THEN\r\n    INSERT INTO public.partner_onboarding_history (onboarding_id, action, note, actor_id)\r\n    VALUES (NEW.id, 'status_changed', OLD.status || ' -> ' || NEW.status, auth.uid());\r\n  END IF;\r\n  RETURN NEW;\r\nEND;\r\n$function$\n",
+      "hash": "8dfafd96a208c212fe4bfbf50ec8262e",
+      "identity": "log_partner_onboarding_change()",
+      "member": true,
+      "name": "log_partner_onboarding_change",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.approve_partner_onboarding(p_onboarding_id uuid)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nDECLARE\r\n  v_onboarding public.partner_onboardings%ROWTYPE;\r\n  v_signup public.business_owner_signup_requests%ROWTYPE;\r\n  v_owner_id uuid := gen_random_uuid();\r\n  v_product record;\r\n  v_product_id uuid;\r\n  v_image text;\r\n  v_option jsonb;\r\nBEGIN\r\n  IF NOT EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid()) THEN\r\n    RAISE EXCEPTION '관리자만 입점을 승인할 수 있습니다.';\r\n  END IF;\r\n\r\n  SELECT * INTO v_onboarding\r\n  FROM public.partner_onboardings\r\n  WHERE id = p_onboarding_id\r\n  FOR UPDATE;\r\n\r\n  IF NOT FOUND THEN RAISE EXCEPTION '입점 신청을 찾을 수 없습니다.'; END IF;\r\n  IF v_onboarding.status = 'approved' THEN\r\n    RETURN jsonb_build_object('success', true, 'business_owner_id', v_onboarding.business_owner_id);\r\n  END IF;\r\n  IF v_onboarding.status <> 'ready_for_approval' THEN RAISE EXCEPTION '승인 대기 상태가 아닙니다.'; END IF;\r\n  IF v_onboarding.contract_status <> 'completed' THEN RAISE EXCEPTION '계약이 완료되지 않았습니다.'; END IF;\r\n  IF v_onboarding.signup_request_id IS NULL THEN RAISE EXCEPTION '사업주 콘솔 가입 계정이 연결되지 않았습니다.'; END IF;\r\n  IF NOT EXISTS (\r\n    SELECT 1 FROM public.partner_onboarding_documents\r\n    WHERE onboarding_id = p_onboarding_id AND document_type = 'business_registration'\r\n  ) OR NOT EXISTS (\r\n    SELECT 1 FROM public.partner_onboarding_documents\r\n    WHERE onboarding_id = p_onboarding_id AND document_type = 'bank_account'\r\n  ) THEN RAISE EXCEPTION '필수 서류가 누락되었습니다.'; END IF;\r\n  IF NOT EXISTS (SELECT 1 FROM public.partner_onboarding_products WHERE onboarding_id = p_onboarding_id) THEN\r\n    RAISE EXCEPTION '등록할 상품이 없습니다.';\r\n  END IF;\r\n  IF (SELECT count(*) FROM public.partner_onboarding_products WHERE onboarding_id = p_onboarding_id) > 10 THEN\r\n    RAISE EXCEPTION '사업주별 상품은 최대 10개까지 등록할 수 있습니다.';\r\n  END IF;\r\n\r\n  SELECT * INTO v_signup\r\n  FROM public.business_owner_signup_requests\r\n  WHERE id = v_onboarding.signup_request_id\r\n  FOR UPDATE;\r\n\r\n  IF NOT FOUND OR v_signup.status <> 'pending' THEN RAISE EXCEPTION '유효한 가입 신청이 아닙니다.'; END IF;\r\n  IF regexp_replace(v_signup.business_number, '[^0-9]', '', 'g') <> v_onboarding.business_number THEN\r\n    RAISE EXCEPTION '가입 신청과 입점 신청의 사업자번호가 일치하지 않습니다.';\r\n  END IF;\r\n  IF lower(btrim(v_signup.email)) <> lower(btrim(v_onboarding.email)) THEN\r\n    RAISE EXCEPTION '가입 신청과 입점 신청의 이메일이 일치하지 않습니다.';\r\n  END IF;\r\n  IF EXISTS (SELECT 1 FROM public.business_owners WHERE business_number = v_onboarding.business_number) THEN\r\n    RAISE EXCEPTION '이미 등록된 사업자번호입니다.';\r\n  END IF;\r\n\r\n  UPDATE public.partner_onboardings SET status = 'approving', updated_at = now()\r\n  WHERE id = p_onboarding_id;\r\n\r\n  INSERT INTO public.business_owners (\r\n    id, auth_user_id, owner_code, email, name, business_number, representative,\r\n    contact_name, contact_phone, address, address_detail, zipcode,\r\n    bank_name, bank_account, bank_holder, tax_email, commission_rate, status\r\n  ) VALUES (\r\n    v_owner_id, v_signup.auth_user_id, v_onboarding.owner_code, v_signup.email, v_onboarding.business_name,\r\n    v_onboarding.business_number, v_onboarding.representative, v_onboarding.contact_name,\r\n    v_onboarding.contact_phone, v_onboarding.address, v_onboarding.address_detail,\r\n    v_onboarding.zipcode, v_onboarding.bank_name, v_onboarding.bank_account,\r\n    v_onboarding.bank_holder, v_onboarding.tax_email, v_onboarding.commission_rate, 'active'\r\n  );\r\n\r\n  INSERT INTO public.business_owner_documents (\r\n    business_owner_id, document_type, file_name, file_url, file_size, mime_type,\r\n    storage_bucket, storage_path, sort_order\r\n  )\r\n  SELECT v_owner_id, document_type, file_name, storage_path, file_size, mime_type,\r\n         'partner-onboarding-documents', storage_path,\r\n         CASE WHEN document_type = 'business_registration' THEN 0 ELSE 1 END\r\n  FROM public.partner_onboarding_documents WHERE onboarding_id = p_onboarding_id;\r\n\r\n  FOR v_product IN\r\n    SELECT * FROM public.partner_onboarding_products\r\n    WHERE onboarding_id = p_onboarding_id ORDER BY sort_order, created_at\r\n  LOOP\r\n    INSERT INTO public.products (\r\n      business_owner_id, category_id, name, summary, description, thumbnail,\r\n      original_price, sale_price, min_participants, max_participants,\r\n      duration_minutes, address, address_detail, region, is_visible\r\n    ) VALUES (\r\n      v_owner_id, v_product.category_id, v_product.name, v_product.summary,\r\n      v_product.description, v_product.thumbnail, v_product.original_price,\r\n      v_product.sale_price, v_product.min_participants, v_product.max_participants,\r\n      v_product.duration_minutes, v_product.address, v_product.address_detail,\r\n      v_product.region, false\r\n    ) RETURNING id INTO v_product_id;\r\n\r\n    FOR v_image IN SELECT jsonb_array_elements_text(v_product.image_urls)\r\n    LOOP\r\n      INSERT INTO public.product_images (product_id, image_url, sort_order)\r\n      VALUES (v_product_id, v_image, 0);\r\n    END LOOP;\r\n    FOR v_option IN SELECT value FROM jsonb_array_elements(v_product.options)\r\n    LOOP\r\n      INSERT INTO public.product_options (product_id, name, price, is_required, sort_order)\r\n      VALUES (\r\n        v_product_id,\r\n        v_option->>'name',\r\n        COALESCE((v_option->>'price')::integer, 0),\r\n        COALESCE((v_option->>'is_required')::boolean, false),\r\n        COALESCE((v_option->>'sort_order')::integer, 0)\r\n      );\r\n    END LOOP;\r\n  END LOOP;\r\n\r\n  INSERT INTO public.user_roles (id, role) VALUES (v_signup.auth_user_id, 'business_owner')\r\n  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;\r\n\r\n  UPDATE public.business_owner_signup_requests\r\n  SET status = 'approved', matched_business_owner_id = v_owner_id,\r\n      reviewed_by = auth.uid(), reviewed_at = now(), updated_at = now()\r\n  WHERE id = v_signup.id;\r\n\r\n  UPDATE public.partner_onboardings\r\n  SET status = 'approved', business_owner_id = v_owner_id,\r\n      approved_by = auth.uid(), approved_at = now(), updated_at = now()\r\n  WHERE id = p_onboarding_id;\r\n\r\n  RETURN jsonb_build_object('success', true, 'business_owner_id', v_owner_id);\r\nEND;\r\n$function$\n",
+      "hash": "3f4722424b7e4199aff4bd509aefc9be",
+      "identity": "approve_partner_onboarding(uuid)",
+      "member": true,
+      "name": "approve_partner_onboarding",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.delete_business_owner_safely(p_business_owner_id uuid, p_confirmation_name text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nDECLARE\r\n  v_owner public.business_owners%ROWTYPE;\r\n  v_product_count integer;\r\n  v_reservation_count integer;\r\n  v_settlement_count integer;\r\nBEGIN\r\n  IF NOT EXISTS (\r\n    SELECT 1 FROM public.admins\r\n    WHERE id = auth.uid() AND is_active = true\r\n  ) THEN\r\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\r\n  END IF;\r\n\r\n  SELECT * INTO v_owner\r\n  FROM public.business_owners\r\n  WHERE id = p_business_owner_id\r\n  FOR UPDATE;\r\n\r\n  IF NOT FOUND THEN\r\n    RAISE EXCEPTION 'BUSINESS_OWNER_NOT_FOUND';\r\n  END IF;\r\n  IF btrim(COALESCE(p_confirmation_name, '')) <> v_owner.name THEN\r\n    RAISE EXCEPTION 'CONFIRMATION_NAME_MISMATCH';\r\n  END IF;\r\n\r\n  SELECT count(*) INTO v_product_count FROM public.products\r\n  WHERE business_owner_id = p_business_owner_id;\r\n  SELECT count(*) INTO v_reservation_count FROM public.reservations\r\n  WHERE business_owner_id = p_business_owner_id;\r\n  SELECT count(*) INTO v_settlement_count FROM public.settlements\r\n  WHERE business_owner_id = p_business_owner_id;\r\n\r\n  IF v_product_count > 0 OR v_reservation_count > 0 OR v_settlement_count > 0 THEN\r\n    RAISE EXCEPTION 'BUSINESS_OWNER_HAS_RELATED_DATA products=% reservations=% settlements=%',\r\n      v_product_count, v_reservation_count, v_settlement_count;\r\n  END IF;\r\n\r\n  IF v_owner.auth_user_id IS NOT NULL THEN\r\n    DELETE FROM public.user_roles\r\n    WHERE id = v_owner.auth_user_id AND role = 'business_owner';\r\n  END IF;\r\n\r\n  DELETE FROM public.business_owners WHERE id = p_business_owner_id;\r\n\r\n  RETURN jsonb_build_object(\r\n    'success', true,\r\n    'business_owner_id', p_business_owner_id,\r\n    'name', v_owner.name\r\n  );\r\nEND;\r\n$function$\n",
+      "hash": "f082b3d908dca83d7196588cb56dde3f",
+      "identity": "delete_business_owner_safely(uuid,text)",
+      "member": true,
+      "name": "delete_business_owner_safely",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_primary_business_for_owner()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nBEGIN\r\n  INSERT INTO public.businesses (\r\n    id, business_owner_id, business_code, name, business_number, representative,\r\n    contact_name, contact_phone, email, address, address_detail, zipcode,\r\n    latitude, longitude, logo_url, status, is_primary\r\n  ) VALUES (\r\n    NEW.id, NEW.id, public.make_business_code(NEW.id), NEW.name, NEW.business_number,\r\n    NEW.representative, NEW.contact_name, NEW.contact_phone, NEW.email, NEW.address,\r\n    NEW.address_detail, NEW.zipcode, NEW.latitude, NEW.longitude, NEW.logo_url,\r\n    NEW.status, true\r\n  ) ON CONFLICT (id) DO NOTHING;\r\n  RETURN NEW;\r\nEND;\r\n$function$\n",
+      "hash": "85c270a64a66f477ac63e0d1216d45e6",
+      "identity": "create_primary_business_for_owner()",
+      "member": true,
+      "name": "create_primary_business_for_owner",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.delete_business_safely(p_business_id uuid, p_confirmation_name text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nDECLARE v_business public.businesses%ROWTYPE; v_products integer; v_reservations integer;\r\nBEGIN\r\n  SELECT * INTO v_business FROM public.businesses WHERE id = p_business_id FOR UPDATE;\r\n  IF NOT FOUND THEN RAISE EXCEPTION 'BUSINESS_NOT_FOUND'; END IF;\r\n  IF NOT (v_business.business_owner_id = public.current_business_owner_id()\r\n          OR EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid() AND is_active = true)) THEN\r\n    RAISE EXCEPTION 'BUSINESS_ACCESS_DENIED';\r\n  END IF;\r\n  IF btrim(COALESCE(p_confirmation_name, '')) <> v_business.name THEN\r\n    RAISE EXCEPTION 'CONFIRMATION_NAME_MISMATCH';\r\n  END IF;\r\n  SELECT count(*) INTO v_products FROM public.products WHERE business_id = p_business_id;\r\n  SELECT count(*) INTO v_reservations FROM public.reservations WHERE business_id = p_business_id;\r\n  IF v_products > 0 OR v_reservations > 0 OR v_business.is_primary THEN\r\n    RAISE EXCEPTION 'BUSINESS_HAS_RELATED_DATA_OR_IS_PRIMARY products=% reservations=%', v_products, v_reservations;\r\n  END IF;\r\n  DELETE FROM public.businesses WHERE id = p_business_id;\r\n  RETURN jsonb_build_object('success', true, 'business_id', p_business_id);\r\nEND;\r\n$function$\n",
+      "hash": "3aaf5cf5e95aa1c1ff5ba3cd512b50ca",
+      "identity": "delete_business_safely(uuid,text)",
+      "member": true,
+      "name": "delete_business_safely",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.next_generated_document_number(p_type text)\n RETURNS text\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\n  SELECT upper(left(regexp_replace(p_type, '[^a-zA-Z]', '', 'g'), 3))\r\n    || '-' || to_char(current_date, 'YYYYMMDD')\r\n    || '-' || lpad(nextval('public.generated_document_number_seq')::text, 6, '0');\r\n$function$\n",
+      "hash": "f9273da5b5e0f21726aa5231f823f68f",
+      "identity": "next_generated_document_number(text)",
+      "member": true,
+      "name": "next_generated_document_number",
+      "owner": "postgres",
+      "returns": "text",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.prepare_generated_document()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nDECLARE\r\n  v_reservation public.reservations%ROWTYPE;\r\nBEGIN\r\n  IF NEW.document_number IS NULL OR btrim(NEW.document_number) = '' THEN\r\n    NEW.document_number := public.next_generated_document_number(NEW.document_type);\r\n  END IF;\r\n\r\n  IF NEW.reservation_id IS NOT NULL THEN\r\n    SELECT * INTO v_reservation FROM public.reservations WHERE id = NEW.reservation_id;\r\n    IF NOT FOUND THEN RAISE EXCEPTION 'DOCUMENT_RESERVATION_NOT_FOUND'; END IF;\r\n    IF auth.uid() IS NOT NULL AND v_reservation.daycare_id <> auth.uid()\r\n       AND NOT EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid() AND is_active = true) THEN\r\n      RAISE EXCEPTION 'DOCUMENT_RESERVATION_ACCESS_DENIED';\r\n    END IF;\r\n    NEW.daycare_id := v_reservation.daycare_id;\r\n    NEW.business_owner_id := v_reservation.business_owner_id;\r\n    NEW.business_id := v_reservation.business_id;\r\n  ELSIF auth.uid() IS NOT NULL\r\n        AND NEW.daycare_id <> auth.uid()\r\n        AND NOT EXISTS (SELECT 1 FROM public.admins WHERE id = auth.uid() AND is_active = true) THEN\r\n    RAISE EXCEPTION 'DOCUMENT_DAYCARE_ACCESS_DENIED';\r\n  END IF;\r\n\r\n  IF TG_OP = 'UPDATE' AND OLD.status = 'issued' THEN\r\n    IF NEW.reservation_snapshot IS DISTINCT FROM OLD.reservation_snapshot\r\n       OR NEW.publisher_snapshot IS DISTINCT FROM OLD.publisher_snapshot\r\n       OR NEW.editable_content IS DISTINCT FROM OLD.editable_content THEN\r\n      RAISE EXCEPTION 'ISSUED_DOCUMENT_IS_IMMUTABLE';\r\n    END IF;\r\n  END IF;\r\n\r\n  IF NEW.status = 'issued' AND NEW.issued_at IS NULL THEN NEW.issued_at := now(); END IF;\r\n  NEW.updated_at := now();\r\n  RETURN NEW;\r\nEND;\r\n$function$\n",
+      "hash": "28b128eddee38ecf50772c1a4869dc31",
+      "identity": "prepare_generated_document()",
+      "member": true,
+      "name": "prepare_generated_document",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_business_owner_signup_request()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_business_number text;\n  v_contact_phone text;\n  v_bank_account text;\n  v_business_registration jsonb;\n  v_bank_account_document jsonb;\n  v_business_registration_path text;\n  v_bank_account_path text;\nBEGIN\n  IF COALESCE(NEW.raw_user_meta_data->>'account_type', '') <> 'business_owner_signup' THEN\n    RETURN NEW;\n  END IF;\n\n  v_business_number := regexp_replace(COALESCE(NEW.raw_user_meta_data->>'business_number', ''), '[^0-9]', '', 'g');\n  v_contact_phone := regexp_replace(COALESCE(NEW.raw_user_meta_data->>'contact_phone', ''), '[^0-9]', '', 'g');\n  v_bank_account := regexp_replace(COALESCE(NEW.raw_user_meta_data->>'bank_account', ''), '[^0-9]', '', 'g');\n  v_business_registration := COALESCE(NEW.raw_user_meta_data->'business_registration_document', '{}'::jsonb);\n  v_bank_account_document := COALESCE(NEW.raw_user_meta_data->'bank_account_document', '{}'::jsonb);\n  v_business_registration_path := NULLIF(v_business_registration->>'storage_path', '');\n  v_bank_account_path := NULLIF(v_bank_account_document->>'storage_path', '');\n\n  IF NULLIF(btrim(COALESCE(NEW.email, '')), '') IS NULL\n     OR NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'business_name', '')), '') IS NULL\n     OR NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'representative', '')), '') IS NULL\n     OR NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'contact_name', '')), '') IS NULL\n     OR v_business_number !~ '^[0-9]{10}$'\n     OR length(v_contact_phone) < 9\n     OR NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'bank_name', '')), '') IS NULL\n     OR NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'bank_holder', '')), '') IS NULL\n     OR length(v_bank_account) < 6 THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUIRED_FIELDS_INVALID';\n  END IF;\n\n  IF COALESCE(v_business_registration->>'storage_bucket', '') <> 'business-signup-documents'\n     OR COALESCE(v_bank_account_document->>'storage_bucket', '') <> 'business-signup-documents'\n     OR v_business_registration_path IS NULL\n     OR v_bank_account_path IS NULL\n     OR COALESCE(v_business_registration->>'mime_type', '') NOT IN ('application/pdf', 'image/jpeg', 'image/png', 'image/webp')\n     OR COALESCE(v_bank_account_document->>'mime_type', '') NOT IN ('application/pdf', 'image/jpeg', 'image/png', 'image/webp') THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_DOCUMENTS_REQUIRED';\n  END IF;\n\n  IF NOT EXISTS (\n    SELECT 1\n    FROM storage.objects\n    WHERE bucket_id = 'business-signup-documents' AND name = v_business_registration_path\n  ) OR NOT EXISTS (\n    SELECT 1\n    FROM storage.objects\n    WHERE bucket_id = 'business-signup-documents' AND name = v_bank_account_path\n  ) THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_DOCUMENTS_NOT_FOUND';\n  END IF;\n\n  IF EXISTS (\n    SELECT 1\n    FROM public.business_owners\n    WHERE lower(email) = lower(NEW.email) OR business_number = v_business_number\n  ) THEN\n    RAISE EXCEPTION 'BUSINESS_OWNER_ALREADY_REGISTERED';\n  END IF;\n\n  INSERT INTO public.business_owners (\n    id, auth_user_id, email, name, business_number, representative,\n    contact_name, contact_phone, address, bank_name, bank_holder, bank_account, status\n  ) VALUES (\n    NEW.id,\n    NEW.id,\n    lower(btrim(NEW.email)),\n    btrim(NEW.raw_user_meta_data->>'business_name'),\n    v_business_number,\n    btrim(NEW.raw_user_meta_data->>'representative'),\n    btrim(NEW.raw_user_meta_data->>'contact_name'),\n    v_contact_phone,\n    '',\n    btrim(NEW.raw_user_meta_data->>'bank_name'),\n    btrim(NEW.raw_user_meta_data->>'bank_holder'),\n    v_bank_account,\n    'inactive'\n  );\n\n  INSERT INTO public.business_owner_signup_requests (\n    auth_user_id, email, business_name, business_number, representative, contact_name, contact_phone,\n    bank_name, bank_holder, bank_account,\n    business_registration_storage_bucket, business_registration_storage_path,\n    business_registration_file_name, business_registration_file_size, business_registration_mime_type,\n    bank_account_copy_storage_bucket, bank_account_copy_storage_path,\n    bank_account_copy_file_name, bank_account_copy_file_size, bank_account_copy_mime_type,\n    status, matched_business_owner_id\n  ) VALUES (\n    NEW.id,\n    lower(btrim(NEW.email)),\n    btrim(NEW.raw_user_meta_data->>'business_name'),\n    v_business_number,\n    btrim(NEW.raw_user_meta_data->>'representative'),\n    btrim(NEW.raw_user_meta_data->>'contact_name'),\n    v_contact_phone,\n    btrim(NEW.raw_user_meta_data->>'bank_name'),\n    btrim(NEW.raw_user_meta_data->>'bank_holder'),\n    v_bank_account,\n    v_business_registration->>'storage_bucket',\n    v_business_registration_path,\n    NULLIF(v_business_registration->>'file_name', ''),\n    CASE WHEN (v_business_registration->>'file_size') ~ '^[0-9]+$'\n      THEN (v_business_registration->>'file_size')::bigint ELSE NULL END,\n    NULLIF(v_business_registration->>'mime_type', ''),\n    v_bank_account_document->>'storage_bucket',\n    v_bank_account_path,\n    NULLIF(v_bank_account_document->>'file_name', ''),\n    CASE WHEN (v_bank_account_document->>'file_size') ~ '^[0-9]+$'\n      THEN (v_bank_account_document->>'file_size')::bigint ELSE NULL END,\n    NULLIF(v_bank_account_document->>'mime_type', ''),\n    'pending',\n    NEW.id\n  );\n\n  INSERT INTO public.business_owner_documents (\n    business_owner_id, document_type, file_name, file_url, file_size, mime_type,\n    storage_bucket, storage_path, sort_order\n  ) VALUES\n    (\n      NEW.id,\n      'business_registration',\n      COALESCE(NULLIF(v_business_registration->>'file_name', ''), '사업자등록증'),\n      v_business_registration_path,\n      CASE WHEN (v_business_registration->>'file_size') ~ '^[0-9]+$'\n        THEN (v_business_registration->>'file_size')::integer ELSE NULL END,\n      NULLIF(v_business_registration->>'mime_type', ''),\n      'business-signup-documents',\n      v_business_registration_path,\n      0\n    ),\n    (\n      NEW.id,\n      'bank_account',\n      COALESCE(NULLIF(v_bank_account_document->>'file_name', ''), '통장사본'),\n      v_bank_account_path,\n      CASE WHEN (v_bank_account_document->>'file_size') ~ '^[0-9]+$'\n        THEN (v_bank_account_document->>'file_size')::integer ELSE NULL END,\n      NULLIF(v_bank_account_document->>'mime_type', ''),\n      'business-signup-documents',\n      v_bank_account_path,\n      1\n    );\n\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "25f28f367cb7d43ca0e37e2fa2923e3d",
+      "identity": "create_business_owner_signup_request()",
+      "member": true,
+      "name": "create_business_owner_signup_request",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.approve_business_owner_signup(p_request_id uuid, p_business_owner_id uuid)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\r\nDECLARE\r\n  v_request public.business_owner_signup_requests%ROWTYPE;\r\n  v_owner public.business_owners%ROWTYPE;\r\n  v_previous_auth_user_id uuid;\r\nBEGIN\r\n  IF NOT EXISTS (\r\n    SELECT 1 FROM public.admins\r\n    WHERE id = auth.uid() AND is_active = true\r\n  ) THEN\r\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\r\n  END IF;\r\n\r\n  SELECT * INTO v_request\r\n  FROM public.business_owner_signup_requests\r\n  WHERE id = p_request_id\r\n  FOR UPDATE;\r\n\r\n  IF NOT FOUND THEN\r\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUEST_NOT_FOUND';\r\n  END IF;\r\n  IF v_request.status NOT IN ('pending', 'on_hold', 'rejected') THEN\r\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUEST_ALREADY_PROCESSED';\r\n  END IF;\r\n\r\n  SELECT * INTO v_owner\r\n  FROM public.business_owners\r\n  WHERE id = p_business_owner_id\r\n  FOR UPDATE;\r\n\r\n  IF NOT FOUND THEN\r\n    RAISE EXCEPTION 'BUSINESS_OWNER_NOT_FOUND';\r\n  END IF;\r\n  IF lower(btrim(v_request.email)) <> lower(btrim(v_owner.email)) THEN\r\n    RAISE EXCEPTION 'BUSINESS_OWNER_EMAIL_MISMATCH';\r\n  END IF;\r\n\r\n  v_previous_auth_user_id := v_owner.auth_user_id;\r\n\r\n  UPDATE public.business_owners\r\n  SET auth_user_id = v_request.auth_user_id,\r\n      bank_name = COALESCE(NULLIF(btrim(v_request.bank_name), ''), bank_name),\r\n      bank_holder = COALESCE(NULLIF(btrim(v_request.bank_holder), ''), bank_holder),\r\n      bank_account = COALESCE(NULLIF(v_request.bank_account, ''), bank_account),\r\n      status = 'active',\r\n      updated_at = now()\r\n  WHERE id = p_business_owner_id;\r\n\r\n  IF v_request.business_registration_storage_path IS NOT NULL THEN\r\n    DELETE FROM public.business_owner_documents\r\n    WHERE business_owner_id = p_business_owner_id AND document_type = 'business_registration';\r\n\r\n    INSERT INTO public.business_owner_documents (\r\n      business_owner_id, document_type, file_name, file_url, file_size, mime_type,\r\n      storage_bucket, storage_path, sort_order\r\n    ) VALUES (\r\n      p_business_owner_id,\r\n      'business_registration',\r\n      COALESCE(v_request.business_registration_file_name, '사업자등록증'),\r\n      v_request.business_registration_storage_path,\r\n      v_request.business_registration_file_size,\r\n      v_request.business_registration_mime_type,\r\n      COALESCE(v_request.business_registration_storage_bucket, 'business-signup-documents'),\r\n      v_request.business_registration_storage_path,\r\n      0\r\n    );\r\n  END IF;\r\n\r\n  IF v_request.bank_account_copy_storage_path IS NOT NULL THEN\r\n    DELETE FROM public.business_owner_documents\r\n    WHERE business_owner_id = p_business_owner_id AND document_type = 'bank_account';\r\n\r\n    INSERT INTO public.business_owner_documents (\r\n      business_owner_id, document_type, file_name, file_url, file_size, mime_type,\r\n      storage_bucket, storage_path, sort_order\r\n    ) VALUES (\r\n      p_business_owner_id,\r\n      'bank_account',\r\n      COALESCE(v_request.bank_account_copy_file_name, '통장사본'),\r\n      v_request.bank_account_copy_storage_path,\r\n      v_request.bank_account_copy_file_size,\r\n      v_request.bank_account_copy_mime_type,\r\n      COALESCE(v_request.bank_account_copy_storage_bucket, 'business-signup-documents'),\r\n      v_request.bank_account_copy_storage_path,\r\n      1\r\n    );\r\n  END IF;\r\n\r\n  IF v_previous_auth_user_id IS NOT NULL\r\n     AND v_previous_auth_user_id <> v_request.auth_user_id THEN\r\n    DELETE FROM public.user_roles\r\n    WHERE id = v_previous_auth_user_id AND role = 'business_owner';\r\n  END IF;\r\n\r\n  INSERT INTO public.user_roles (id, role)\r\n  VALUES (v_request.auth_user_id, 'business_owner')\r\n  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;\r\n\r\n  UPDATE public.business_owner_signup_requests\r\n  SET status = 'approved',\r\n      matched_business_owner_id = p_business_owner_id,\r\n      reviewed_by = auth.uid(),\r\n      reviewed_at = now(),\r\n      updated_at = now()\r\n  WHERE id = p_request_id;\r\n\r\n  RETURN jsonb_build_object(\r\n    'success', true,\r\n    'business_owner_id', p_business_owner_id,\r\n    'auth_user_id', v_request.auth_user_id,\r\n    'owner_code', v_owner.owner_code,\r\n    'email', v_owner.email\r\n  );\r\nEND;\r\n$function$\n",
+      "hash": "a77f10e266d9d35ee5fe3b627261edf8",
+      "identity": "approve_business_owner_signup(uuid,uuid)",
+      "member": true,
+      "name": "approve_business_owner_signup",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.review_business_owner_signup(p_request_id uuid, p_status text, p_review_note text DEFAULT NULL::text, p_business_owner_id uuid DEFAULT NULL::uuid)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_request public.business_owner_signup_requests%ROWTYPE;\n  v_business_owner_id uuid;\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM public.admins\n    WHERE id = auth.uid() AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT * INTO v_request\n  FROM public.business_owner_signup_requests\n  WHERE id = p_request_id\n  FOR UPDATE;\n\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_REQUEST_NOT_FOUND';\n  END IF;\n\n  IF p_status = 'approved' THEN\n    IF v_request.status = 'approved' THEN\n      UPDATE public.business_owner_signup_requests\n      SET review_note = NULLIF(btrim(p_review_note), ''),\n          reviewed_by = auth.uid(),\n          reviewed_at = now(),\n          updated_at = now()\n      WHERE id = p_request_id;\n      RETURN jsonb_build_object('success', true, 'status', 'approved');\n    END IF;\n\n    v_business_owner_id := COALESCE(\n      v_request.matched_business_owner_id,\n      p_business_owner_id\n    );\n\n    IF v_business_owner_id IS NOT NULL\n       AND NOT EXISTS (\n         SELECT 1 FROM public.business_owners\n         WHERE id = v_business_owner_id\n       ) THEN\n      IF v_business_owner_id <> v_request.auth_user_id THEN\n        RAISE EXCEPTION 'BUSINESS_OWNER_NOT_FOUND';\n      END IF;\n      v_business_owner_id := NULL;\n    END IF;\n\n    IF v_business_owner_id IS NULL THEN\n      SELECT id INTO v_business_owner_id\n      FROM public.business_owners\n      WHERE auth_user_id = v_request.auth_user_id\n      LIMIT 1\n      FOR UPDATE;\n    END IF;\n\n    IF v_business_owner_id IS NULL THEN\n      IF EXISTS (\n        SELECT 1 FROM public.business_owners\n        WHERE lower(btrim(email)) = lower(btrim(v_request.email))\n           OR business_number = v_request.business_number\n      ) THEN\n        RAISE EXCEPTION 'BUSINESS_OWNER_SIGNUP_CONFLICT';\n      END IF;\n\n      INSERT INTO public.business_owners (\n        id,\n        auth_user_id,\n        email,\n        name,\n        business_number,\n        representative,\n        contact_name,\n        contact_phone,\n        address,\n        bank_name,\n        bank_holder,\n        bank_account,\n        status\n      ) VALUES (\n        v_request.auth_user_id,\n        v_request.auth_user_id,\n        lower(btrim(v_request.email)),\n        btrim(v_request.business_name),\n        v_request.business_number,\n        btrim(v_request.representative),\n        btrim(v_request.contact_name),\n        v_request.contact_phone,\n        '',\n        NULLIF(btrim(v_request.bank_name), ''),\n        NULLIF(btrim(v_request.bank_holder), ''),\n        NULLIF(v_request.bank_account, ''),\n        'active'\n      )\n      RETURNING id INTO v_business_owner_id;\n    END IF;\n\n    PERFORM public.approve_business_owner_signup(\n      p_request_id,\n      v_business_owner_id\n    );\n\n    UPDATE public.business_owner_signup_requests\n    SET review_note = NULLIF(btrim(p_review_note), ''),\n        updated_at = now()\n    WHERE id = p_request_id;\n\n    RETURN jsonb_build_object(\n      'success', true,\n      'status', 'approved',\n      'business_owner_id', v_business_owner_id\n    );\n  END IF;\n\n  IF p_status NOT IN ('rejected', 'on_hold') THEN\n    RAISE EXCEPTION 'INVALID_BUSINESS_SIGNUP_STATUS';\n  END IF;\n\n  IF v_request.status = 'approved'\n     AND v_request.matched_business_owner_id IS NOT NULL THEN\n    UPDATE public.business_owners\n    SET status = 'inactive', updated_at = now()\n    WHERE id = v_request.matched_business_owner_id;\n  END IF;\n\n  UPDATE public.business_owner_signup_requests\n  SET status = p_status,\n      review_note = NULLIF(btrim(p_review_note), ''),\n      reviewed_by = auth.uid(),\n      reviewed_at = now(),\n      updated_at = now()\n  WHERE id = p_request_id;\n\n  RETURN jsonb_build_object('success', true, 'status', p_status);\nEND;\n$function$\n",
+      "hash": "a4ccbcb8becf160a69831c801e6b7bb2",
+      "identity": "review_business_owner_signup(uuid,text,text,uuid)",
+      "member": true,
+      "name": "review_business_owner_signup",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.guard_sensitive_profile_fields()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'pg_temp'\nAS $function$\nBEGIN\n  IF public.is_active_admin() OR auth.role() = 'service_role' THEN\n    RETURN NEW;\n  END IF;\n  IF TG_TABLE_NAME = 'daycares' THEN\n    IF NEW.id IS DISTINCT FROM auth.uid() THEN\n      RAISE EXCEPTION 'Only the applicant can edit this profile' USING ERRCODE='42501';\n    END IF;\n    IF TG_OP = 'INSERT' THEN\n      IF NEW.status IS DISTINCT FROM 'pending' OR NEW.approved_at IS NOT NULL\n        OR NEW.rejection_reason IS NOT NULL OR NEW.revision_reason IS NOT NULL\n        OR NEW.revision_requested_at IS NOT NULL OR NEW.deleted_at IS NOT NULL OR NEW.deleted_by IS NOT NULL THEN\n        RAISE EXCEPTION 'Only an administrator can approve an application' USING ERRCODE='42501';\n      END IF;\n    ELSE\n      IF NEW.id IS DISTINCT FROM OLD.id OR NEW.email IS DISTINCT FROM OLD.email\n        OR NEW.approved_at IS DISTINCT FROM OLD.approved_at\n        OR NEW.rejection_reason IS DISTINCT FROM OLD.rejection_reason\n        OR NEW.revision_reason IS DISTINCT FROM OLD.revision_reason\n        OR NEW.revision_requested_at IS DISTINCT FROM OLD.revision_requested_at\n        OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.deleted_by IS DISTINCT FROM OLD.deleted_by\n        OR (NEW.status IS DISTINCT FROM OLD.status AND NOT (\n          OLD.status = 'revision_required' AND NEW.status = 'requested'\n          AND NEW.revision_submitted_at IS NOT NULL\n        )) THEN\n        RAISE EXCEPTION 'Only an administrator can change approval information' USING ERRCODE='42501';\n      END IF;\n    END IF;\n  ELSIF TG_TABLE_NAME = 'business_owners' THEN\n    IF NEW.commission_rate IS DISTINCT FROM OLD.commission_rate\n      OR NEW.status IS DISTINCT FROM OLD.status\n      OR NEW.business_number IS DISTINCT FROM OLD.business_number\n      OR NEW.email IS DISTINCT FROM OLD.email THEN\n      RAISE EXCEPTION 'Only an administrator can change business privileges' USING ERRCODE='42501';\n    END IF;\n  END IF;\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "901b0a814d3dcb9851c6d433c18d423f",
+      "identity": "guard_sensitive_profile_fields()",
+      "member": true,
+      "name": "guard_sensitive_profile_fields",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=pg_catalog, pg_temp"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_admin_product_preview_token(p_product_id uuid)\n RETURNS TABLE(token uuid, expires_at timestamp with time zone)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_business_owner_id uuid;\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1\n    FROM public.admins\n    WHERE id = auth.uid() AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT p.business_owner_id\n  INTO v_business_owner_id\n  FROM public.products p\n  WHERE p.id = p_product_id;\n\n  IF v_business_owner_id IS NULL THEN\n    RAISE EXCEPTION 'PRODUCT_NOT_FOUND';\n  END IF;\n\n  DELETE FROM public.product_preview_tokens ppt\n  WHERE ppt.product_id = p_product_id\n    AND ppt.expires_at <= now();\n\n  RETURN QUERY\n  INSERT INTO public.product_preview_tokens(product_id, business_owner_id)\n  VALUES (p_product_id, v_business_owner_id)\n  RETURNING product_preview_tokens.token, product_preview_tokens.expires_at;\nEND;\n$function$\n",
+      "hash": "ff6c911575b0357b2827a239ca267e7f",
+      "identity": "create_admin_product_preview_token(uuid)",
+      "member": true,
+      "name": "create_admin_product_preview_token",
+      "owner": "postgres",
+      "returns": "TABLE(token uuid, expires_at timestamp with time zone)",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.create_secure_payment_order(p_items jsonb, p_reserver_info jsonb, p_payment_method text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_daycare_id uuid := auth.uid();\n  v_item jsonb;\n  v_option_input jsonb;\n  v_product public.products%ROWTYPE;\n  v_option public.product_options%ROWTYPE;\n  v_product_id uuid;\n  v_reserved_date date;\n  v_participants integer;\n  v_quantity integer;\n  v_item_total integer;\n  v_total integer := 0;\n  v_snapshot jsonb := '[]'::jsonb;\n  v_options jsonb;\n  v_order_id text;\n  v_goods_name text;\n  v_item_count integer := 0;\nBEGIN\n  IF v_daycare_id IS NULL OR NOT public.is_daycare() THEN\n    RAISE EXCEPTION '승인된 보육기관 회원만 결제할 수 있습니다.';\n  END IF;\n  IF jsonb_typeof(p_items) <> 'array' OR jsonb_array_length(p_items) = 0 OR jsonb_array_length(p_items) > 20 THEN\n    RAISE EXCEPTION '주문 상품 정보가 올바르지 않습니다.';\n  END IF;\n  IF p_payment_method NOT IN ('card', 'bank') THEN\n    RAISE EXCEPTION '결제수단이 올바르지 않습니다.';\n  END IF;\n  IF NULLIF(trim(COALESCE(p_reserver_info ->> 'name', '')), '') IS NULL\n     OR NULLIF(trim(COALESCE(p_reserver_info ->> 'phone', '')), '') IS NULL THEN\n    RAISE EXCEPTION '예약자 정보가 올바르지 않습니다.';\n  END IF;\n\n  FOR v_item IN SELECT value FROM jsonb_array_elements(p_items)\n  LOOP\n    v_product_id := NULLIF(v_item ->> 'productId', '')::uuid;\n    v_reserved_date := NULLIF(v_item ->> 'reservedDate', '')::date;\n    v_participants := (v_item ->> 'participants')::integer;\n    IF v_product_id IS NULL OR v_reserved_date IS NULL OR v_participants IS NULL OR v_participants < 1 THEN\n      RAISE EXCEPTION '상품 또는 예약 인원 정보가 올바르지 않습니다.';\n    END IF;\n    SELECT * INTO v_product FROM public.products WHERE id = v_product_id FOR SHARE;\n    IF NOT FOUND OR NOT v_product.is_visible OR v_product.is_sold_out THEN\n      RAISE EXCEPTION '예약할 수 없는 상품입니다.';\n    END IF;\n    IF v_reserved_date < CURRENT_DATE OR v_participants < v_product.min_participants OR v_participants > v_product.max_participants THEN\n      RAISE EXCEPTION '예약 날짜 또는 인원이 상품 조건에 맞지 않습니다.';\n    END IF;\n    IF EXISTS (\n      SELECT 1 FROM public.product_unavailable_dates u\n      WHERE u.product_id = v_product_id AND u.unavailable_date = v_reserved_date\n    ) THEN\n      RAISE EXCEPTION '선택한 날짜는 예약할 수 없습니다.';\n    END IF;\n    IF NOT EXISTS (\n      SELECT 1 FROM public.reservation_holds h\n      WHERE h.product_id = v_product_id\n        AND h.reserved_date = v_reserved_date\n        AND h.daycare_id = v_daycare_id\n        AND h.expires_at > now()\n    ) THEN\n      RAISE EXCEPTION '결제 대기 시간이 만료되었습니다. 다시 시도해주세요.';\n    END IF;\n\n    v_item_total := v_product.sale_price * v_participants;\n    v_options := '[]'::jsonb;\n    FOR v_option_input IN SELECT value FROM jsonb_array_elements(COALESCE(v_item -> 'options', '[]'::jsonb))\n    LOOP\n      v_quantity := (v_option_input ->> 'quantity')::integer;\n      IF v_quantity IS NULL OR v_quantity < 1 OR v_quantity > 100 THEN\n        RAISE EXCEPTION '옵션 수량이 올바르지 않습니다.';\n      END IF;\n      SELECT * INTO v_option FROM public.product_options\n      WHERE id = NULLIF(v_option_input ->> 'id', '')::uuid AND product_id = v_product_id;\n      IF NOT FOUND THEN\n        RAISE EXCEPTION '상품 옵션 정보가 올바르지 않습니다.';\n      END IF;\n      v_item_total := v_item_total + (v_option.price * v_quantity);\n      v_options := v_options || jsonb_build_array(jsonb_build_object(\n        'id', v_option.id, 'name', v_option.name, 'price', v_option.price, 'quantity', v_quantity\n      ));\n    END LOOP;\n\n    v_snapshot := v_snapshot || jsonb_build_array(jsonb_build_object(\n      'productId', v_product.id,\n      'productName', v_product.name,\n      'businessOwnerId', v_product.business_owner_id,\n      'reservedDate', v_reserved_date,\n      'reservedTime', NULLIF(v_item ->> 'reservedTime', ''),\n      'participants', v_participants,\n      'options', v_options,\n      'totalAmount', v_item_total\n    ));\n    v_total := v_total + v_item_total;\n    v_item_count := v_item_count + 1;\n    IF v_item_count = 1 THEN v_goods_name := v_product.name; END IF;\n  END LOOP;\n\n  v_order_id := 'ORD' || to_char(clock_timestamp(), 'YYYYMMDDHH24MISSMS') || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));\n  INSERT INTO public.payment_orders(order_id, daycare_id, items, reserver_info, payment_method, amount)\n  VALUES (v_order_id, v_daycare_id, v_snapshot, p_reserver_info, p_payment_method, v_total);\n  RETURN jsonb_build_object(\n    'orderId', v_order_id,\n    'amount', v_total,\n    'goodsName', CASE WHEN v_item_count > 1 THEN v_goods_name || ' 외 ' || (v_item_count - 1) || '건' ELSE v_goods_name END\n  );\nEND;\n$function$\n",
+      "hash": "2dd8988a4fed70d7ff649694da28086e",
+      "identity": "create_secure_payment_order(jsonb,jsonb,text)",
+      "member": true,
+      "name": "create_secure_payment_order",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.attach_signup_business_details()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_address text;\n  v_address_detail text;\n  v_zipcode text;\n  v_category_text text;\n  v_category_id uuid;\nBEGIN\n  IF COALESCE(NEW.raw_user_meta_data->>'account_type', '') <> 'business_owner_signup' THEN\n    RETURN NEW;\n  END IF;\n\n  v_address := NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'address', '')), '');\n  v_address_detail := NULLIF(btrim(COALESCE(NEW.raw_user_meta_data->>'address_detail', '')), '');\n  v_zipcode := NULLIF(regexp_replace(COALESCE(NEW.raw_user_meta_data->>'zipcode', ''), '[^0-9]', '', 'g'), '');\n  v_category_text := btrim(COALESCE(NEW.raw_user_meta_data->>'category_id', ''));\n\n  -- 구버전 클라이언트나 관리자 생성 계정은 새 메타데이터가 없을 수 있다.\n  -- 계정 생성을 막지 않고, 두 값이 모두 유효한 신규 회원가입만 사업장에 동기화한다.\n  IF v_address IS NULL\n    OR v_category_text !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n  THEN\n    RETURN NEW;\n  END IF;\n\n  v_category_id := v_category_text::uuid;\n  IF NOT EXISTS (\n    SELECT 1 FROM public.categories\n    WHERE id = v_category_id AND is_active = true\n  ) THEN\n    RETURN NEW;\n  END IF;\n\n  UPDATE public.business_owner_signup_requests\n  SET address = v_address,\n      address_detail = v_address_detail,\n      zipcode = v_zipcode,\n      category_id = v_category_id,\n      updated_at = now()\n  WHERE auth_user_id = NEW.id;\n\n  UPDATE public.business_owners\n  SET address = v_address,\n      address_detail = v_address_detail,\n      zipcode = v_zipcode,\n      updated_at = now()\n  WHERE auth_user_id = NEW.id;\n\n  UPDATE public.businesses\n  SET address = v_address,\n      address_detail = v_address_detail,\n      zipcode = v_zipcode,\n      category_id = v_category_id,\n      updated_at = now()\n  WHERE business_owner_id = NEW.id\n    AND is_primary = true;\n\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "f2ee2c2b727d1f8dfa90a9a5012a41d3",
+      "identity": "attach_signup_business_details()",
+      "member": true,
+      "name": "attach_signup_business_details",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.get_site_analytics(p_start_date date, p_end_date date)\n RETURNS TABLE(metric_date date, daily_visits bigint, partner_cta_clicks bigint, signup_cta_clicks bigint)\n LANGUAGE plpgsql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1\n    FROM public.admins\n    WHERE id = auth.uid()\n      AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  IF p_start_date IS NULL OR p_end_date IS NULL OR p_end_date < p_start_date OR p_end_date - p_start_date > 370 THEN\n    RAISE EXCEPTION 'INVALID_ANALYTICS_DATE_RANGE';\n  END IF;\n\n  RETURN QUERY\n  SELECT\n    day::date,\n    coalesce(max(m.metric_count) FILTER (WHERE m.metric_key = 'daily_visit'), 0)::bigint,\n    coalesce(max(m.metric_count) FILTER (WHERE m.metric_key = 'partner_cta_click'), 0)::bigint,\n    coalesce(max(m.metric_count) FILTER (WHERE m.metric_key = 'signup_cta_click'), 0)::bigint\n  FROM generate_series(p_start_date, p_end_date, interval '1 day') day\n  LEFT JOIN public.site_daily_metrics m ON m.metric_date = day::date\n  GROUP BY day\n  ORDER BY day;\nEND;\n$function$\n",
+      "hash": "c32ae1f32b6bbcb9b69cde32834d4c68",
+      "identity": "get_site_analytics(date,date)",
+      "member": true,
+      "name": "get_site_analytics",
+      "owner": "postgres",
+      "returns": "TABLE(metric_date date, daily_visits bigint, partner_cta_clicks bigint, signup_cta_clicks bigint)",
+      "security_definer": true,
+      "settings": [
+        "search_path=\"\""
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.delete_daycare_safely(p_daycare_id uuid, p_confirmation_name text)\n RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_daycare public.daycares%ROWTYPE;\n  v_admin_id uuid := auth.uid();\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM public.admins\n    WHERE id = v_admin_id AND is_active = true\n  ) THEN\n    RAISE EXCEPTION 'ADMIN_REQUIRED';\n  END IF;\n\n  SELECT * INTO v_daycare\n  FROM public.daycares\n  WHERE id = p_daycare_id\n  FOR UPDATE;\n\n  IF NOT FOUND OR v_daycare.status = 'deleted' THEN\n    RAISE EXCEPTION 'DAYCARE_NOT_FOUND';\n  END IF;\n\n  IF btrim(coalesce(p_confirmation_name, '')) <> v_daycare.name THEN\n    RAISE EXCEPTION 'CONFIRMATION_NAME_MISMATCH';\n  END IF;\n\n  IF EXISTS (\n    SELECT 1 FROM public.business_owners\n    WHERE auth_user_id = p_daycare_id\n  ) THEN\n    RAISE EXCEPTION 'SHARED_AUTH_ACCOUNT';\n  END IF;\n\n  UPDATE public.daycares\n  SET status = 'deleted',\n      deleted_at = now(),\n      deleted_by = v_admin_id,\n      updated_at = now()\n  WHERE id = p_daycare_id;\n\n  -- Removing the role blocks all role-gated APIs immediately. Removing the Auth user\n  -- prevents future sign-in, while the daycare row remains as a historical reference.\n  DELETE FROM public.user_roles WHERE id = p_daycare_id;\n  DELETE FROM auth.users WHERE id = p_daycare_id;\n\n  INSERT INTO public.admin_logs (\n    admin_id,\n    action,\n    target_type,\n    target_id,\n    before_data\n  ) VALUES (\n    v_admin_id,\n    'delete',\n    'daycare',\n    p_daycare_id,\n    jsonb_build_object(\n      'name', v_daycare.name,\n      'email', v_daycare.email,\n      'previous_status', v_daycare.status,\n      'deletion_mode', 'soft_delete_with_auth_removal'\n    )\n  );\n\n  RETURN jsonb_build_object(\n    'success', true,\n    'daycare_id', p_daycare_id,\n    'name', v_daycare.name\n  );\nEND;\n$function$\n",
+      "hash": "9d0571d7a2b8223370d88e52b22c4f68",
+      "identity": "delete_daycare_safely(uuid,text)",
+      "member": true,
+      "name": "delete_daycare_safely",
+      "owner": "postgres",
+      "returns": "jsonb",
+      "security_definer": true,
+      "settings": [
+        "search_path=\"\""
+      ]
+    },
+    {
+      "anon": true,
+      "definition": "CREATE OR REPLACE FUNCTION public.attach_signup_business_legal_name()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nDECLARE\n  v_legal_name text;\n  v_business_name text;\nBEGIN\n  IF COALESCE(NEW.raw_user_meta_data->>'account_type', '') <> 'business_owner_signup' THEN\n    RETURN NEW;\n  END IF;\n\n  v_legal_name := NULLIF(btrim(NEW.raw_user_meta_data->>'legal_name'), '');\n  v_business_name := NULLIF(btrim(NEW.raw_user_meta_data->>'business_name'), '');\n  IF v_legal_name IS NULL THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_LEGAL_NAME_REQUIRED';\n  END IF;\n  IF v_business_name IS NULL THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_BUSINESS_NAME_REQUIRED';\n  END IF;\n  IF length(v_legal_name) > 200 THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_LEGAL_NAME_TOO_LONG';\n  END IF;\n  IF length(v_business_name) > 200 THEN\n    RAISE EXCEPTION 'BUSINESS_SIGNUP_BUSINESS_NAME_TOO_LONG';\n  END IF;\n\n  UPDATE public.business_owner_signup_requests\n  SET legal_name = v_legal_name, updated_at = now()\n  WHERE auth_user_id = NEW.id;\n\n  UPDATE public.business_owners\n  SET legal_name = v_legal_name, updated_at = now()\n  WHERE auth_user_id = NEW.id;\n\n  UPDATE public.businesses b\n  SET legal_name = v_legal_name, updated_at = now()\n  FROM public.business_owners o\n  WHERE b.business_owner_id = o.id\n    AND o.auth_user_id = NEW.id\n    AND b.is_primary = true;\n\n  RETURN NEW;\nEND;\n$function$\n",
+      "hash": "a77f98bc8c19ee0f95e47502b8d1641d",
+      "identity": "attach_signup_business_legal_name()",
+      "member": true,
+      "name": "attach_signup_business_legal_name",
+      "owner": "postgres",
+      "returns": "trigger",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ]
+    }
+  ]
+}

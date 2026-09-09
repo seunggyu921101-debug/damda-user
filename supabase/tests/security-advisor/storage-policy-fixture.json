@@ -1,0 +1,102 @@
+{
+  "dev": [
+    {
+      "cmd": "DELETE",
+      "permissive": "PERMISSIVE",
+      "policyname": "Business owners delete own product images",
+      "qual": "((bucket_id = 'public'::text) AND ((storage.foldername(name))[1] = 'product-images'::text) AND (EXISTS ( SELECT 1\n   FROM business_owners owner\n  WHERE (((owner.id)::text = (storage.foldername((owner.name)::text))[2]) AND (owner.auth_user_id = auth.uid())))))",
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": null
+    },
+    {
+      "cmd": "INSERT",
+      "permissive": "PERMISSIVE",
+      "policyname": "Business owners upload own product images",
+      "qual": null,
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": "((bucket_id = 'public'::text) AND ((storage.foldername(name))[1] = 'product-images'::text) AND (EXISTS ( SELECT 1\n   FROM business_owners owner\n  WHERE (((owner.id)::text = (storage.foldername((owner.name)::text))[2]) AND (owner.auth_user_id = auth.uid()) AND ((owner.status)::text = 'active'::text)))))"
+    }
+  ],
+  "prod": [
+    {
+      "cmd": "DELETE",
+      "permissive": "PERMISSIVE",
+      "policyname": "Authenticated users can delete",
+      "qual": "(bucket_id = 'public'::text)",
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": null
+    },
+    {
+      "cmd": "UPDATE",
+      "permissive": "PERMISSIVE",
+      "policyname": "Authenticated users can update",
+      "qual": "(bucket_id = 'public'::text)",
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": null
+    },
+    {
+      "cmd": "INSERT",
+      "permissive": "PERMISSIVE",
+      "policyname": "Authenticated users can upload",
+      "qual": null,
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": "(bucket_id = 'public'::text)"
+    },
+    {
+      "cmd": "DELETE",
+      "permissive": "PERMISSIVE",
+      "policyname": "Business owners delete own product images",
+      "qual": "((bucket_id = 'public'::text) AND ((storage.foldername(name))[1] = 'product-images'::text) AND (EXISTS ( SELECT 1\n   FROM business_owners owner\n  WHERE (((owner.id)::text = (storage.foldername((owner.name)::text))[2]) AND (owner.auth_user_id = auth.uid())))))",
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": null
+    },
+    {
+      "cmd": "INSERT",
+      "permissive": "PERMISSIVE",
+      "policyname": "Business owners upload own product images",
+      "qual": null,
+      "roles": [
+        "authenticated"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": "((bucket_id = 'public'::text) AND ((storage.foldername(name))[1] = 'product-images'::text) AND (EXISTS ( SELECT 1\n   FROM business_owners owner\n  WHERE (((owner.id)::text = (storage.foldername((owner.name)::text))[2]) AND (owner.auth_user_id = auth.uid()) AND ((owner.status)::text = 'active'::text)))))"
+    },
+    {
+      "cmd": "SELECT",
+      "permissive": "PERMISSIVE",
+      "policyname": "Public Access",
+      "qual": "(bucket_id = 'public'::text)",
+      "roles": [
+        "public"
+      ],
+      "schemaname": "storage",
+      "tablename": "objects",
+      "with_check": null
+    }
+  ]
+}
